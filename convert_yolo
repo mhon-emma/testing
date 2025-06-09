@@ -129,7 +129,7 @@ class FinalA2D2YOLOConverter:
                 print("[INFO] Using default bbox classes")
     
     def load_camera_config(self):
-        """Load camera configuration"""
+        """Load camera configuration with proper error handling"""
         config_file = self.a2d2_root / "cams_lidars.json"
         self.camera_matrix = None
         
@@ -138,24 +138,54 @@ class FinalA2D2YOLOConverter:
                 with open(config_file, 'r') as f:
                     config = json.load(f)
                 
-                # Extract camera matrix
-                cameras = config.get('cameras', [])
-                for cam in cameras:
-                    if cam.get('name') == 'cam_front_center':
-                        matrix = cam.get('CameraMatrix', [])
-                        if len(matrix) >= 9:
-                            self.camera_matrix = np.array([
-                                [matrix[0], matrix[1], matrix[2]],
-                                [matrix[3], matrix[4], matrix[5]], 
-                                [matrix[6], matrix[7], matrix[8]]
-                            ])
-                            print(f"[OK] Loaded camera matrix with fx={matrix[0]:.1f}")
-                            break
-                            
+                print(f"[DEBUG] Config file type: {type(config)}")
+                print(f"[DEBUG] Config keys: {list(config.keys()) if isinstance(config, dict) else 'Not a dict'}")
+                
+                # Handle different possible structures
+                cameras = None
+                
+                if isinstance(config, dict):
+                    # Try different possible key names
+                    if 'cameras' in config:
+                        cameras = config['cameras']
+                    elif 'camera' in config:
+                        cameras = config['camera']  
+                    elif 'sensors' in config:
+                        sensors = config['sensors']
+                        if isinstance(sensors, dict):
+                            cameras = sensors.get('cameras', sensors.get('camera'))
+                        elif isinstance(sensors, list):
+                            cameras = [s for s in sensors if s.get('type') == 'camera']
+                
+                print(f"[DEBUG] Cameras found: {cameras is not None}")
+                
+                if cameras is not None:
+                    # Handle cameras as list or dict
+                    if isinstance(cameras, list):
+                        for cam in cameras:
+                            if isinstance(cam, dict) and cam.get('name') == 'cam_front_center':
+                                self.extract_camera_matrix(cam)
+                                break
+                    elif isinstance(cameras, dict):
+                        # Cameras stored as dictionary
+                        front_cam = cameras.get('cam_front_center')
+                        if front_cam:
+                            self.extract_camera_matrix(front_cam)
+                
+                if self.camera_matrix is not None:
+                    print(f"[OK] Loaded camera matrix successfully")
+                else:
+                    print(f"[WARNING] Could not find front center camera in config")
+                    
+            except json.JSONDecodeError as e:
+                print(f"[ERROR] Invalid JSON in config file: {e}")
             except Exception as e:
-                print(f"[WARNING] Could not load camera config: {e}")
+                print(f"[ERROR] Error loading camera config: {e}")
+                print(f"[DEBUG] Config content preview: {str(config)[:200]}...")
+        else:
+            print(f"[WARNING] Config file not found: {config_file}")
         
-        # Default camera matrix if not found
+        # Set default camera matrix if not found
         if self.camera_matrix is None:
             self.camera_matrix = np.array([
                 [1000, 0, 960],    # fx=1000, cx=960 (assuming 1920px width)
@@ -163,6 +193,43 @@ class FinalA2D2YOLOConverter:
                 [0, 0, 1]
             ])
             print("[INFO] Using default camera matrix")
+    
+    def extract_camera_matrix(self, cam_data):
+        """Extract camera matrix from camera data"""
+        try:
+            if isinstance(cam_data, dict):
+                # Try different possible key names for camera matrix
+                matrix_keys = ['CameraMatrix', 'camera_matrix', 'intrinsic', 'K', 'calibration_matrix']
+                matrix = None
+                
+                for key in matrix_keys:
+                    if key in cam_data:
+                        matrix = cam_data[key]
+                        break
+                
+                if matrix is not None and len(matrix) >= 9:
+                    if isinstance(matrix, list) and len(matrix) == 9:
+                        # 3x3 matrix flattened
+                        self.camera_matrix = np.array([
+                            [matrix[0], matrix[1], matrix[2]],
+                            [matrix[3], matrix[4], matrix[5]], 
+                            [matrix[6], matrix[7], matrix[8]]
+                        ])
+                    elif isinstance(matrix, list) and len(matrix) == 3 and all(len(row) == 3 for row in matrix):
+                        # Already 3x3 matrix
+                        self.camera_matrix = np.array(matrix)
+                    else:
+                        print(f"[WARNING] Unexpected camera matrix format: {matrix}")
+                        
+                    if self.camera_matrix is not None:
+                        fx = self.camera_matrix[0, 0]
+                        fy = self.camera_matrix[1, 1]
+                        cx = self.camera_matrix[0, 2]
+                        cy = self.camera_matrix[1, 2]
+                        print(f"[OK] Camera matrix: fx={fx:.1f}, fy={fy:.1f}, cx={cx:.1f}, cy={cy:.1f}")
+                        
+        except Exception as e:
+            print(f"[ERROR] Error extracting camera matrix: {e}")
     
     def setup_output_directories(self):
         """Create output directory structure"""
