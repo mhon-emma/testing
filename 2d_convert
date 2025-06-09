@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""
+Generate 2D detection data from existing semantic segmentation results
+This works with the sequences you already have processed
+"""
+
+import os
+import json
+import numpy as np
+import cv2
+from pathlib import Path
+import shutil
+from tqdm import tqdm
+
+def convert_segmentation_to_detection():
+    """Convert existing segmentation masks to 2D bounding boxes"""
+    
+    # Paths
+    seg_root = Path("/home/Lambdaone/Emma/a2d2_yolo/segmentation")
+    det_root = Path("/home/Lambdaone/Emma/a2d2_yolo/2d_detection")
+    
+    print("Converting segmentation data to 2D detection...")
+    
+    # Class mapping (simplified automotive classes)
+    important_classes = {
+        0: "Car",
+        1: "Pedestrian", 
+        2: "Bicycle",
+        3: "Road",
+        4: "Building",
+        5: "Vegetation",
+        6: "Sky",
+        7: "Sidewalk"
+    }
+    
+    # Only detect vehicles, people, bikes (not static objects)
+    detection_classes = [0, 1, 2]  # Car, Pedestrian, Bicycle
+    
+    total_converted = 0
+    
+    for split in ['train', 'val', 'test']:
+        print(f"\nProcessing {split} split...")
+        
+        seg_img_dir = seg_root / split / "images"
+        seg_label_dir = seg_root / split / "labels"
+        
+        det_img_dir = det_root / split / "images"
+        det_label_dir = det_root / split / "labels"
+        
+        # Create detection directories
+        det_img_dir.mkdir(parents=True, exist_ok=True)
+        det_label_dir.mkdir(parents=True, exist_ok=True)
+        
+        if not seg_img_dir.exists():
+            print(f"  {split}: No segmentation data found")
+            continue
+        
+        split_converted = 0
+        
+        # Process each image
+        for img_file in tqdm(list(seg_img_dir.glob("*.png")), desc=f"{split}"):
+            label_file = seg_label_dir / img_file.with_suffix('.txt').name
+            
+            if not label_file.exists():
+                continue
+            
+            # Check if detection files already exist
+            det_img_path = det_img_dir / img_file.name
+            det_label_path = det_label_dir / img_file.with_suffix('.txt').name
+            
+            if det_img_path.exists() and det_label_path.exists():
+                continue  # Skip existing
+            
+            try:
+                # Load image to get dimensions
+                img = cv2.imread(str(img_file))
+                if img is None:
+                    continue
+                
+                h, w = img.shape[:2]
+                
+                # Read segmentation annotations
+                with open(label_file, 'r') as f:
+                    seg_annotations = f.readlines()
+                
+                # Convert segmentation polygons to bounding boxes
+                det_annotations = []
+                
+                for line in seg_annotations:
+                    parts = line.strip().split()
+                    if len(parts) < 7:  # Need at least class + 3 points
+                        continue
+                    
+                    class_id = int(parts[0])
+                    
+                    # Only process detection classes (vehicles, people, bikes)
+                    if class_id not in detection_classes:
+                        continue
+                    
+                    # Extract polygon coordinates
+                    coords = [float(x) for x in parts[1:]]
+                    
+                    if len(coords) < 6:  # Need at least 3 points (6 coordinates)
+                        continue
+                    
+                    # Convert to x,y pairs
+                    points = []
+                    for i in range(0, len(coords), 2):
+                        if i + 1 < len(coords):
+                            points.append([coords[i], coords[i+1]])
+                    
+                    if len(points) < 3:
+                        continue
+                    
+                    # Get bounding box from polygon
+                    points = np.array(points)
+                    x_min = points[:, 0].min()
+                    y_min = points[:, 1].min()
+                    x_max = points[:, 0].max()
+                    y_max = points[:, 1].max()
+                    
+                    # Convert to YOLO format (center, width, height)
+                    x_center = (x_min + x_max) / 2
+                    y_center = (y_min + y_max) / 2
+                    width = x_max - x_min
+                    height = y_max - y_min
+                    
+                    # Filter out very small or invalid boxes
+                    if width > 0.01 and height > 0.01 and width < 1.0 and height < 1.0:
+                        bbox_line = f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
+                        det_annotations.append(bbox_line)
+                
+                # Copy image
+                shutil.copy2(img_file, det_img_path)
+                
+                # Save detection annotations
+                with open(det_label_path, 'w') as f:
+                    f.write('\n'.join(det_annotations))
+                
+                split_converted += 1
+                
+            except Exception as e:
+                print(f"Error processing {img_file.name}: {e}")
+                continue
+        
+        print(f"  {split}: {split_converted} files converted")
+        total_converted += split_converted
+    
+    print(f"\nTotal converted: {total_converted} files")
+    
+    # Create detection config
+    create_detection_config()
+
+def create_detection_config():
+    """Create 2D detection config file"""
+    
+    config = {
+        'path': '/home/Lambdaone/Emma/a2d2_yolo/2d_detection',
+        'train': 'train/images',
+        'val': 'val/images',
+        'test': 'test/images',
+        'nc': 3,
+        'names': ['Car', 'Pedestrian', 'Bicycle']
+    }
+    
+    config_path = Path("/home/Lambdaone/Emma/a2d2_yolo/2d_detection_config.yaml")
+    
+    import yaml
+    with open(config_path, 'w') as f:
+        yaml.dump(config, f, default_flow_style=False)
+    
+    print(f"Created detection config: {config_path}")
+
+def check_current_status():
+    """Check current dataset status"""
+    
+    base_path = Path("/home/Lambdaone/Emma/a2d2_yolo")
+    
+    print("Current A2D2 YOLO Dataset Status:")
+    print("=" * 40)
+    
+    for task in ['segmentation', '2d_detection', '3d_detection']:
+        print(f"\n{task.upper()}:")
+        
+        task_total = 0
+        for split in ['train', 'val', 'test']:
+            img_dir = base_path / task / split / "images"
+            if img_dir.exists():
+                count = len(list(img_dir.glob("*")))
+                print(f"  {split}: {count:,} images")
+                task_total += count
+            else:
+                print(f"  {split}: 0 images")
+        
+        print(f"  Total: {task_total:,} images")
+
+if __name__ == "__main__":
+    print("A2D2 2D Detection Converter")
+    print("Converting from existing segmentation data...")
+    
+    # Check current status
+    check_current_status()
+    
+    # Convert segmentation to detection
+    convert_segmentation_to_detection()
+    
+    # Show final status
+    print("\nFinal status:")
+    check_current_status()
+    
+    print("\nNext steps:")
+    print("1. Train 2D detection: python train_2d.py")
+    print("2. For 3D detection, need to check bbox data availability")
