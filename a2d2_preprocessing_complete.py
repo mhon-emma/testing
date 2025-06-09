@@ -43,23 +43,23 @@ class A2D2YOLOConverter:
         bbox_dir = self.a2d2_root / "camera_lidar_semantic_bboxes"
         
         if semantic_dir.exists():
-            print(f"✅ Found semantic directory: {semantic_dir}")
+            print(f"[OK] Found semantic directory: {semantic_dir}")
         else:
-            print(f"❌ Missing: {semantic_dir}")
+            print(f"[ERROR] Missing: {semantic_dir}")
             
         if bbox_dir.exists():
-            print(f"✅ Found bbox directory: {bbox_dir}")
+            print(f"[OK] Found bbox directory: {bbox_dir}")
         else:
-            print(f"❌ Missing: {bbox_dir}")
+            print(f"[ERROR] Missing: {bbox_dir}")
         
         # Check for config files
         config_file = self.a2d2_root / "cams_lidars.json"
         if config_file.exists():
-            print(f"✅ Found config: {config_file}")
+            print(f"[OK] Found config: {config_file}")
         else:
-            print(f"❌ Missing config file: {config_file}")
+            print(f"[ERROR] Missing config file: {config_file}")
         
-        print(f"📁 Output will be saved to: {self.output_root}")
+        print(f"Output will be saved to: {self.output_root}")
     
     def load_config(self):
         """Load camera and lidar configuration"""
@@ -67,13 +67,13 @@ class A2D2YOLOConverter:
         try:
             with open(config_path, 'r') as f:
                 config = json.load(f)
-            print("✅ Camera configuration loaded")
+            print("[OK] Camera configuration loaded")
             return config
         except FileNotFoundError:
-            print(f"⚠️ Config file not found: {config_path}")
+            print(f"[WARNING] Config file not found: {config_path}")
             return {}
         except Exception as e:
-            print(f"⚠️ Error loading config: {e}")
+            print(f"[WARNING] Error loading config: {e}")
             return {}
     
     def load_semantic_classes(self):
@@ -82,10 +82,10 @@ class A2D2YOLOConverter:
         try:
             with open(class_path, 'r') as f:
                 classes = json.load(f)
-            print(f"✅ Loaded {len(classes)} semantic classes")
+            print(f"[OK] Loaded {len(classes)} semantic classes")
             return classes
         except FileNotFoundError:
-            print(f"⚠️ Semantic class file not found: {class_path}")
+            print(f"[WARNING] Semantic class file not found: {class_path}")
             # Return default classes if file not found
             return {
                 "Car": [255, 0, 0],
@@ -100,10 +100,10 @@ class A2D2YOLOConverter:
         try:
             with open(class_path, 'r') as f:
                 classes = json.load(f)
-            print(f"✅ Loaded {len(classes)} bbox classes")
+            print(f"[OK] Loaded {len(classes)} bbox classes")
             return classes
         except FileNotFoundError:
-            print(f"⚠️ Bbox class file not found: {class_path}")
+            print(f"[WARNING] Bbox class file not found: {class_path}")
             # Return default classes
             return {
                 "Car": 0,
@@ -132,18 +132,18 @@ class A2D2YOLOConverter:
                     lidar_dir = self.output_root / task / split / 'lidar'
                     lidar_dir.mkdir(parents=True, exist_ok=True)
         
-        print(f"✅ Output directories created")
+        print(f"[OK] Output directories created")
     
     def rgb_to_class_id(self, rgb_mask):
         """Convert RGB semantic mask to class IDs - FIXED VERSION"""
         # Check if mask is loaded properly
         if rgb_mask is None:
-            print("⚠️ RGB mask is None")
+            print("[WARNING] RGB mask is None")
             return np.zeros((100, 100), dtype=np.uint8)  # Return dummy mask
         
         # Ensure mask is 3D (H, W, C)
         if len(rgb_mask.shape) != 3:
-            print(f"⚠️ Unexpected mask shape: {rgb_mask.shape}")
+            print(f"[WARNING] Unexpected mask shape: {rgb_mask.shape}")
             if len(rgb_mask.shape) == 2:
                 # Grayscale mask - convert to 3-channel
                 rgb_mask = cv2.cvtColor(rgb_mask, cv2.COLOR_GRAY2RGB)
@@ -152,7 +152,7 @@ class A2D2YOLOConverter:
         
         h, w, c = rgb_mask.shape
         if c != 3:
-            print(f"⚠️ Expected 3 channels, got {c}")
+            print(f"[WARNING] Expected 3 channels, got {c}")
             return np.zeros((h, w), dtype=np.uint8)
         
         # Initialize class mask
@@ -173,7 +173,7 @@ class A2D2YOLOConverter:
                 mask = (rgb_mask[:, :, 0] == r) & (rgb_mask[:, :, 1] == g) & (rgb_mask[:, :, 2] == b)
                 class_mask[mask] = class_id
         except Exception as e:
-            print(f"⚠️ Error in RGB to class conversion: {e}")
+            print(f"[WARNING] Error in RGB to class conversion: {e}")
         
         return class_mask
     
@@ -187,7 +187,7 @@ class A2D2YOLOConverter:
         all_sequences = list(semantic_root.glob("2018*"))
         
         if not all_sequences:
-            print("❌ No sequences found for semantic segmentation!")
+            print("[ERROR] No sequences found for semantic segmentation!")
             return
         
         print(f"Found {len(all_sequences)} sequences")
@@ -288,12 +288,12 @@ class A2D2YOLOConverter:
                         total_processed += 1
                         
                     except Exception as e:
-                        print(f"⚠️ Error processing {img_file.name}: {e}")
+                        print(f"[WARNING] Error processing {img_file.name}: {e}")
                         continue
             
-            print(f"✅ {split_name}: {split_count} images processed")
+            print(f"[OK] {split_name}: {split_count} images processed")
         
-        print(f"✅ Semantic segmentation complete: {total_processed} total images")
+        print(f"[OK] Semantic segmentation complete: {total_processed} total images")
     
     def process_2d_detection(self):
         """Process 2D detection from 3D bboxes - SIMPLIFIED VERSION"""
@@ -305,7 +305,7 @@ class A2D2YOLOConverter:
         all_sequences = list(bbox_root.glob("2018*"))
         
         if not all_sequences:
-            print("❌ No sequences found for 3D bounding boxes!")
+            print("[ERROR] No sequences found for 3D bounding boxes!")
             return
         
         print(f"Found {len(all_sequences)} sequences")
@@ -404,12 +404,12 @@ class A2D2YOLOConverter:
                         total_processed += 1
                         
                     except Exception as e:
-                        print(f"⚠️ Error processing {img_file.name}: {e}")
+                        print(f"[WARNING] Error processing {img_file.name}: {e}")
                         continue
             
-            print(f"✅ {split_name}: {split_count} images processed")
+            print(f"[OK] {split_name}: {split_count} images processed")
         
-        print(f"✅ 2D detection complete: {total_processed} total images")
+        print(f"[OK] 2D detection complete: {total_processed} total images")
     
     def create_dataset_configs(self):
         """Create YOLO dataset configuration files"""
@@ -440,13 +440,13 @@ class A2D2YOLOConverter:
             config_path = self.output_root / config_name
             with open(config_path, 'w') as f:
                 yaml.dump(config_data, f, default_flow_style=False)
-            print(f"✅ Created: {config_path}")
+            print(f"[OK] Created: {config_path}")
     
     def run_conversion(self):
         """Run the complete conversion process"""
-        print("🚀 Starting A2D2 to YOLO conversion...")
-        print(f"📂 Input: {self.a2d2_root}")
-        print(f"📁 Output: {self.output_root}")
+        print("Starting A2D2 to YOLO conversion...")
+        print(f"Input: {self.a2d2_root}")
+        print(f"Output: {self.output_root}")
         
         try:
             # Process semantic segmentation
@@ -458,13 +458,13 @@ class A2D2YOLOConverter:
             # Create dataset configurations
             self.create_dataset_configs()
             
-            print("\n" + "🎉" + "="*48 + "🎉")
+            print("\n" + "="*50)
             print("           CONVERSION COMPLETED!")
-            print("🎉" + "="*48 + "🎉")
-            print(f"📁 Converted data saved to: {self.output_root}")
+            print("="*50)
+            print(f"Converted data saved to: {self.output_root}")
             
         except Exception as e:
-            print(f"\n❌ Error during conversion: {e}")
+            print(f"\n[ERROR] Error during conversion: {e}")
             import traceback
             traceback.print_exc()
 
