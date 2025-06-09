@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-Fixed A2D2 to YOLO Format Converter
-Fixes the RGB mask processing errors
-
-Usage:
-    python convert_yolo_fixed.py
+Proper A2D2 to YOLOv12 Converter
+Supports: 2D Detection, 3D Detection (with modifications), Semantic Segmentation
 """
 
 import os
@@ -17,81 +14,50 @@ import shutil
 from tqdm import tqdm
 import yaml
 
-class A2D2YOLOConverter:
+class ProperA2D2YOLOConverter:
     def __init__(self):
-        # Set paths based on your Linux structure
         self.a2d2_root = Path("/home/Lambdaone/Emma/a2d2_full")
         self.output_root = Path("/home/Lambdaone/Emma/a2d2_yolo")
-        
-        # Verify paths exist
-        self.verify_paths()
         
         # Load configurations
         self.cams_lidars_config = self.load_config()
         self.semantic_classes = self.load_semantic_classes()
         self.bbox_classes = self.load_bbox_classes()
         
-        # Create output structure
+        # Camera calibration
+        self.camera_matrix = self.get_camera_matrix()
+        
         self.setup_output_directories()
-    
-    def verify_paths(self):
-        """Verify that required paths exist"""
-        print("Verifying A2D2 dataset structure...")
-        
-        # Check if main directories exist
-        semantic_dir = self.a2d2_root / "camera_lidar_semantic"
-        bbox_dir = self.a2d2_root / "camera_lidar_semantic_bboxes"
-        
-        if semantic_dir.exists():
-            print(f"[OK] Found semantic directory: {semantic_dir}")
-        else:
-            print(f"[ERROR] Missing: {semantic_dir}")
-            
-        if bbox_dir.exists():
-            print(f"[OK] Found bbox directory: {bbox_dir}")
-        else:
-            print(f"[ERROR] Missing: {bbox_dir}")
-        
-        # Check for config files
-        config_file = self.a2d2_root / "cams_lidars.json"
-        if config_file.exists():
-            print(f"[OK] Found config: {config_file}")
-        else:
-            print(f"[ERROR] Missing config file: {config_file}")
-        
-        print(f"Output will be saved to: {self.output_root}")
     
     def load_config(self):
         """Load camera and lidar configuration"""
         config_path = self.a2d2_root / "cams_lidars.json"
         try:
             with open(config_path, 'r') as f:
-                config = json.load(f)
-            print("[OK] Camera configuration loaded")
-            return config
-        except FileNotFoundError:
-            print(f"[WARNING] Config file not found: {config_path}")
-            return {}
-        except Exception as e:
-            print(f"[WARNING] Error loading config: {e}")
+                return json.load(f)
+        except:
             return {}
     
     def load_semantic_classes(self):
-        """Load semantic segmentation class definitions"""
+        """Load semantic class definitions with proper RGB mapping"""
         class_path = self.a2d2_root / "camera_lidar_semantic" / "class_list.json"
         try:
             with open(class_path, 'r') as f:
-                classes = json.load(f)
-            print(f"[OK] Loaded {len(classes)} semantic classes")
-            return classes
-        except FileNotFoundError:
-            print(f"[WARNING] Semantic class file not found: {class_path}")
-            # Return default classes if file not found
+                return json.load(f)
+        except:
+            # A2D2 standard classes (you may need to verify these)
             return {
                 "Car": [255, 0, 0],
-                "Pedestrian": [0, 255, 0], 
+                "Pedestrian": [0, 255, 0],
+                "Bicycle": [0, 0, 255],
                 "Road": [128, 128, 128],
-                "Building": [0, 0, 255]
+                "Sidewalk": [244, 35, 232],
+                "Building": [70, 70, 70],
+                "Vegetation": [107, 142, 35],
+                "Sky": [70, 130, 180],
+                "Pole": [153, 153, 153],
+                "TrafficSign": [220, 220, 0],
+                "TrafficLight": [250, 170, 30]
             }
     
     def load_bbox_classes(self):
@@ -99,325 +65,437 @@ class A2D2YOLOConverter:
         class_path = self.a2d2_root / "camera_lidar_semantic_bboxes" / "class_list.json"
         try:
             with open(class_path, 'r') as f:
-                classes = json.load(f)
-            print(f"[OK] Loaded {len(classes)} bbox classes")
-            return classes
-        except FileNotFoundError:
-            print(f"[WARNING] Bbox class file not found: {class_path}")
-            # Return default classes
-            return {
-                "Car": 0,
-                "Pedestrian": 1,
-                "Bicycle": 2,
-                "Bus": 3,
-                "Truck": 4
-            }
+                return json.load(f)
+        except:
+            return ["Car", "Pedestrian", "Bicycle", "Bus", "Truck", "TrafficSign", "TrafficLight"]
+    
+    def get_camera_matrix(self):
+        """Extract proper camera intrinsic matrix"""
+        if not self.cams_lidars_config:
+            return None
+            
+        cameras = self.cams_lidars_config.get('cameras', [])
+        for cam in cameras:
+            if cam.get('name') == 'cam_front_center':
+                matrix = cam.get('CameraMatrix', [])
+                if len(matrix) >= 9:
+                    K = np.array([
+                        [matrix[0], matrix[1], matrix[2]],
+                        [matrix[3], matrix[4], matrix[5]],
+                        [matrix[6], matrix[7], matrix[8]]
+                    ])
+                    return K
+        return None
     
     def setup_output_directories(self):
-        """Create output directory structure"""
-        print("Setting up output directories...")
-        
+        """Create output directories"""
         tasks = ['2d_detection', '3d_detection', 'segmentation']
         splits = ['train', 'val', 'test']
         
         for task in tasks:
             for split in splits:
-                img_dir = self.output_root / task / split / 'images'
-                label_dir = self.output_root / task / split / 'labels'
-                
-                img_dir.mkdir(parents=True, exist_ok=True)
-                label_dir.mkdir(parents=True, exist_ok=True)
+                (self.output_root / task / split / 'images').mkdir(parents=True, exist_ok=True)
+                (self.output_root / task / split / 'labels').mkdir(parents=True, exist_ok=True)
                 
                 if task == '3d_detection':
-                    lidar_dir = self.output_root / task / split / 'lidar'
-                    lidar_dir.mkdir(parents=True, exist_ok=True)
-        
-        print(f"[OK] Output directories created")
+                    (self.output_root / task / split / 'point_clouds').mkdir(parents=True, exist_ok=True)
     
-    def rgb_to_class_id(self, rgb_mask):
-        """Convert RGB semantic mask to class IDs - FIXED VERSION"""
-        # Check if mask is loaded properly
-        if rgb_mask is None:
-            print("[WARNING] RGB mask is None")
-            return np.zeros((100, 100), dtype=np.uint8)  # Return dummy mask
+    def project_3d_to_2d(self, point_3d, camera_matrix):
+        """Properly project 3D point to 2D image coordinates"""
+        if camera_matrix is None:
+            return None
+            
+        # Convert to homogeneous coordinates
+        point_homo = np.array([point_3d[0], point_3d[1], point_3d[2], 1.0])
         
-        # Ensure mask is 3D (H, W, C)
-        if len(rgb_mask.shape) != 3:
-            print(f"[WARNING] Unexpected mask shape: {rgb_mask.shape}")
-            if len(rgb_mask.shape) == 2:
-                # Grayscale mask - convert to 3-channel
-                rgb_mask = cv2.cvtColor(rgb_mask, cv2.COLOR_GRAY2RGB)
-            else:
-                return np.zeros(rgb_mask.shape[:2], dtype=np.uint8)
+        # Project to camera coordinates (you may need extrinsic matrix here)
+        # For now, assuming points are already in camera coordinate system
+        point_cam = point_3d
         
-        h, w, c = rgb_mask.shape
-        if c != 3:
-            print(f"[WARNING] Expected 3 channels, got {c}")
-            return np.zeros((h, w), dtype=np.uint8)
+        if point_cam[2] <= 0:  # Behind camera
+            return None
         
-        # Initialize class mask
+        # Project to image plane
+        point_2d_homo = camera_matrix @ point_cam
+        
+        if point_2d_homo[2] == 0:
+            return None
+            
+        x = point_2d_homo[0] / point_2d_homo[2]
+        y = point_2d_homo[1] / point_2d_homo[2]
+        
+        return [x, y]
+    
+    def convert_3d_bbox_to_2d(self, bbox_3d, camera_matrix, img_width, img_height):
+        """Convert 3D bounding box to 2D YOLO format"""
+        if camera_matrix is None:
+            return None
+            
+        # Extract 3D box parameters
+        center = bbox_3d.get('center', [0, 0, 0])
+        size = bbox_3d.get('size', [1, 1, 1])
+        rotation = bbox_3d.get('rotation', [0, 0, 0])
+        
+        # Generate 8 corners of 3D bounding box
+        l, w, h = size[0], size[1], size[2]
+        
+        # Box corners in object coordinate system
+        corners = np.array([
+            [-l/2, -w/2, -h/2], [l/2, -w/2, -h/2],
+            [l/2, w/2, -h/2], [-l/2, w/2, -h/2],
+            [-l/2, -w/2, h/2], [l/2, -w/2, h/2],
+            [l/2, w/2, h/2], [-l/2, w/2, h/2]
+        ])
+        
+        # Apply rotation (simplified - implement proper rotation matrix if needed)
+        # For now, just translate to center
+        corners += center
+        
+        # Project all corners to 2D
+        projected_corners = []
+        for corner in corners:
+            point_2d = self.project_3d_to_2d(corner, camera_matrix)
+            if point_2d is not None:
+                projected_corners.append(point_2d)
+        
+        if len(projected_corners) < 4:
+            return None
+        
+        # Get 2D bounding box from projected corners
+        projected_corners = np.array(projected_corners)
+        x_min = max(0, projected_corners[:, 0].min())
+        y_min = max(0, projected_corners[:, 1].min())
+        x_max = min(img_width, projected_corners[:, 0].max())
+        y_max = min(img_height, projected_corners[:, 1].max())
+        
+        # Convert to YOLO format (normalized)
+        x_center = (x_min + x_max) / 2 / img_width
+        y_center = (y_min + y_max) / 2 / img_height
+        width = (x_max - x_min) / img_width
+        height = (y_max - y_min) / img_height
+        
+        # Filter out invalid boxes
+        if width <= 0 or height <= 0 or width > 1 or height > 1:
+            return None
+            
+        return [x_center, y_center, width, height]
+    
+    def rgb_to_class_mask(self, rgb_image):
+        """Convert RGB semantic image to class mask"""
+        if rgb_image is None or len(rgb_image.shape) != 3:
+            return np.zeros((100, 100), dtype=np.uint8)
+        
+        h, w = rgb_image.shape[:2]
         class_mask = np.zeros((h, w), dtype=np.uint8)
         
-        # Create mapping from RGB to class ID
-        class_map = {}
-        for i, (class_name, rgb_values) in enumerate(self.semantic_classes.items()):
-            if isinstance(rgb_values, list) and len(rgb_values) == 3:
-                rgb_tuple = tuple(rgb_values)
-                class_map[rgb_tuple] = i
-        
-        # Convert RGB to class IDs
-        try:
-            for rgb_tuple, class_id in class_map.items():
-                # Create mask for this color
-                r, g, b = rgb_tuple
-                mask = (rgb_mask[:, :, 0] == r) & (rgb_mask[:, :, 1] == g) & (rgb_mask[:, :, 2] == b)
+        for class_id, (class_name, rgb_value) in enumerate(self.semantic_classes.items()):
+            if isinstance(rgb_value, list) and len(rgb_value) == 3:
+                r, g, b = rgb_value
+                mask = (rgb_image[:, :, 0] == r) & (rgb_image[:, :, 1] == g) & (rgb_image[:, :, 2] == b)
                 class_mask[mask] = class_id
-        except Exception as e:
-            print(f"[WARNING] Error in RGB to class conversion: {e}")
         
         return class_mask
     
-    def process_semantic_segmentation(self):
-        """Process semantic segmentation data - SIMPLIFIED VERSION"""
-        print("\n" + "="*50)
-        print("PROCESSING SEMANTIC SEGMENTATION")
-        print("="*50)
+    def mask_to_yolo_polygons(self, class_mask, class_id, img_width, img_height):
+        """Convert class mask to YOLO polygon format"""
+        binary_mask = (class_mask == class_id).astype(np.uint8)
         
-        semantic_root = self.a2d2_root / "camera_lidar_semantic"
-        all_sequences = list(semantic_root.glob("2018*"))
+        # Find contours
+        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        if not all_sequences:
-            print("[ERROR] No sequences found for semantic segmentation!")
-            return
-        
-        print(f"Found {len(all_sequences)} sequences")
-        
-        # Split sequences
-        n_total = len(all_sequences)
-        n_train = int(n_total * 0.7)
-        n_val = int(n_total * 0.15)
-        
-        train_seqs = all_sequences[:n_train]
-        val_seqs = all_sequences[n_train:n_train + n_val]
-        test_seqs = all_sequences[n_train + n_val:]
-        
-        sequence_splits = [
-            (train_seqs, "train"),
-            (val_seqs, "val"),
-            (test_seqs, "test")
-        ]
-        
-        total_processed = 0
-        
-        for sequences, split_name in sequence_splits:
-            if not sequences:
+        polygons = []
+        for contour in contours:
+            # Skip small contours
+            if cv2.contourArea(contour) < 100:
                 continue
-                
-            print(f"\nProcessing {split_name} split ({len(sequences)} sequences)...")
             
-            split_count = 0
-            for seq_dir in tqdm(sequences, desc=f"Processing {split_name}"):
-                camera_dir = seq_dir / "camera" / "cam_front_center"
-                label_dir = seq_dir / "label" / "cam_front_center"
-                
-                if not camera_dir.exists() or not label_dir.exists():
-                    continue
-                
-                # Process each image in the sequence
-                for img_file in camera_dir.glob("*.png"):
-                    # Find corresponding label
-                    label_file = label_dir / img_file.name.replace("camera", "label")
-                    
-                    if not label_file.exists():
-                        continue
-                    
-                    try:
-                        # Load image
-                        img = cv2.imread(str(img_file))
-                        if img is None:
-                            continue
-                        
-                        # Load mask
-                        mask = cv2.imread(str(label_file))
-                        if mask is None:
-                            continue
-                        
-                        # Convert BGR to RGB
-                        mask_rgb = cv2.cvtColor(mask, cv2.COLOR_BGR2RGB)
-                        
-                        # Convert to class mask
-                        class_mask = self.rgb_to_class_id(mask_rgb)
-                        
-                        # For now, create simple annotations
-                        # In a full implementation, you'd convert masks to polygons
-                        annotations = []
-                        unique_classes = np.unique(class_mask)
-                        
-                        for class_id in unique_classes:
-                            if class_id > 0:  # Skip background
-                                # Simple bounding box from mask for now
-                                mask_binary = (class_mask == class_id).astype(np.uint8)
-                                contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                                
-                                for contour in contours:
-                                    if cv2.contourArea(contour) > 100:  # Filter small areas
-                                        x, y, w, h = cv2.boundingRect(contour)
-                                        
-                                        # Convert to YOLO format (normalized)
-                                        img_h, img_w = img.shape[:2]
-                                        x_center = (x + w/2) / img_w
-                                        y_center = (y + h/2) / img_h
-                                        width = w / img_w
-                                        height = h / img_h
-                                        
-                                        annotation = f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
-                                        annotations.append(annotation)
-                        
-                        # Save files
-                        output_img_path = self.output_root / "segmentation" / split_name / "images" / img_file.name
-                        output_label_path = self.output_root / "segmentation" / split_name / "labels" / img_file.with_suffix('.txt').name
-                        
-                        # Copy image
-                        shutil.copy2(img_file, output_img_path)
-                        
-                        # Save annotations
-                        with open(output_label_path, 'w') as f:
-                            f.write('\n'.join(annotations))
-                        
-                        split_count += 1
-                        total_processed += 1
-                        
-                    except Exception as e:
-                        print(f"[WARNING] Error processing {img_file.name}: {e}")
-                        continue
+            # Simplify contour
+            epsilon = 0.02 * cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, epsilon, True)
             
-            print(f"[OK] {split_name}: {split_count} images processed")
+            if len(approx) >= 3:
+                # Normalize coordinates
+                polygon = approx.reshape(-1, 2).astype(np.float32)
+                polygon[:, 0] /= img_width
+                polygon[:, 1] /= img_height
+                
+                # Clip to [0, 1]
+                polygon = np.clip(polygon, 0, 1)
+                
+                # Format for YOLO
+                coords = polygon.flatten()
+                polygons.append(coords)
         
-        print(f"[OK] Semantic segmentation complete: {total_processed} total images")
+        return polygons
     
     def process_2d_detection(self):
-        """Process 2D detection from 3D bboxes - SIMPLIFIED VERSION"""
-        print("\n" + "="*50)
-        print("PROCESSING 2D OBJECT DETECTION")
-        print("="*50)
+        """Process 2D object detection with proper 3D to 2D projection"""
+        print("Processing 2D Object Detection...")
         
         bbox_root = self.a2d2_root / "camera_lidar_semantic_bboxes"
-        all_sequences = list(bbox_root.glob("2018*"))
+        sequences = list(bbox_root.glob("2018*"))
         
-        if not all_sequences:
-            print("[ERROR] No sequences found for 3D bounding boxes!")
+        if not sequences:
+            print("[ERROR] No bbox sequences found")
             return
         
-        print(f"Found {len(all_sequences)} sequences")
-        
         # Split sequences
-        n_total = len(all_sequences)
-        n_train = int(n_total * 0.7)
-        n_val = int(n_total * 0.15)
+        n_train = int(len(sequences) * 0.7)
+        n_val = int(len(sequences) * 0.15)
         
-        train_seqs = all_sequences[:n_train]
-        val_seqs = all_sequences[n_train:n_train + n_val]
-        test_seqs = all_sequences[n_train + n_val:]
-        
-        sequence_splits = [
-            (train_seqs, "train"),
-            (val_seqs, "val"),
-            (test_seqs, "test")
+        splits = [
+            (sequences[:n_train], "train"),
+            (sequences[n_train:n_train+n_val], "val"),
+            (sequences[n_train+n_val:], "test")
         ]
         
         total_processed = 0
         
-        for sequences, split_name in sequence_splits:
-            if not sequences:
+        for seq_list, split_name in splits:
+            if not seq_list:
                 continue
                 
-            print(f"\nProcessing {split_name} split ({len(sequences)} sequences)...")
+            print(f"Processing {split_name} split...")
             
-            split_count = 0
-            for seq_dir in tqdm(sequences, desc=f"Processing {split_name}"):
+            for seq_dir in tqdm(seq_list, desc=f"{split_name}"):
                 camera_dir = seq_dir / "camera" / "cam_front_center"
                 label3d_dir = seq_dir / "label3D" / "cam_front_center"
                 
-                if not camera_dir.exists() or not label3d_dir.exists():
-                    continue
-                
-                # Process each image
                 for img_file in camera_dir.glob("*.png"):
                     label_file = label3d_dir / img_file.name.replace("camera", "label3D").replace(".png", ".json")
                     
                     if not label_file.exists():
                         continue
                     
+                    # Load image
+                    img = cv2.imread(str(img_file))
+                    if img is None:
+                        continue
+                    
+                    h, w = img.shape[:2]
+                    
+                    # Load 3D annotations
                     try:
-                        # Load image
-                        img = cv2.imread(str(img_file))
-                        if img is None:
+                        with open(label_file, 'r') as f:
+                            annotations_3d = json.load(f)
+                    except:
+                        continue
+                    
+                    yolo_annotations = []
+                    
+                    # Process each 3D bounding box
+                    for bbox_3d in annotations_3d:
+                        class_name = bbox_3d.get('class', 'unknown')
+                        
+                        # Map class name to ID
+                        if class_name in self.bbox_classes:
+                            class_id = self.bbox_classes.index(class_name)
+                        else:
                             continue
                         
-                        h, w = img.shape[:2]
+                        # Convert 3D box to 2D
+                        bbox_2d = self.convert_3d_bbox_to_2d(bbox_3d, self.camera_matrix, w, h)
                         
+                        if bbox_2d is not None:
+                            annotation = f"{class_id} {bbox_2d[0]:.6f} {bbox_2d[1]:.6f} {bbox_2d[2]:.6f} {bbox_2d[3]:.6f}"
+                            yolo_annotations.append(annotation)
+                    
+                    # Save files
+                    out_img = self.output_root / "2d_detection" / split_name / "images" / img_file.name
+                    out_label = self.output_root / "2d_detection" / split_name / "labels" / img_file.with_suffix('.txt').name
+                    
+                    shutil.copy2(img_file, out_img)
+                    
+                    with open(out_label, 'w') as f:
+                        f.write('\n'.join(yolo_annotations))
+                    
+                    total_processed += 1
+        
+        print(f"[OK] 2D detection: {total_processed} images processed")
+    
+    def process_semantic_segmentation(self):
+        """Process semantic segmentation with proper polygon conversion"""
+        print("Processing Semantic Segmentation...")
+        
+        semantic_root = self.a2d2_root / "camera_lidar_semantic"
+        sequences = list(semantic_root.glob("2018*"))
+        
+        if not sequences:
+            print("[ERROR] No semantic sequences found")
+            return
+        
+        # Split sequences
+        n_train = int(len(sequences) * 0.7)
+        n_val = int(len(sequences) * 0.15)
+        
+        splits = [
+            (sequences[:n_train], "train"),
+            (sequences[n_train:n_train+n_val], "val"),
+            (sequences[n_train+n_val:], "test")
+        ]
+        
+        total_processed = 0
+        
+        for seq_list, split_name in splits:
+            if not seq_list:
+                continue
+                
+            print(f"Processing {split_name} split...")
+            
+            for seq_dir in tqdm(seq_list, desc=f"{split_name}"):
+                camera_dir = seq_dir / "camera" / "cam_front_center"
+                label_dir = seq_dir / "label" / "cam_front_center"
+                
+                for img_file in camera_dir.glob("*.png"):
+                    label_file = label_dir / img_file.name.replace("camera", "label")
+                    
+                    if not label_file.exists():
+                        continue
+                    
+                    # Load image and mask
+                    img = cv2.imread(str(img_file))
+                    mask_img = cv2.imread(str(label_file))
+                    
+                    if img is None or mask_img is None:
+                        continue
+                    
+                    h, w = img.shape[:2]
+                    
+                    # Convert BGR to RGB
+                    mask_rgb = cv2.cvtColor(mask_img, cv2.COLOR_BGR2RGB)
+                    
+                    # Convert to class mask
+                    class_mask = self.rgb_to_class_mask(mask_rgb)
+                    
+                    # Generate YOLO segmentation annotations
+                    yolo_annotations = []
+                    unique_classes = np.unique(class_mask)
+                    
+                    for class_id in unique_classes:
+                        if class_id == 0:  # Skip background
+                            continue
+                        
+                        # Convert mask to polygons
+                        polygons = self.mask_to_yolo_polygons(class_mask, class_id, w, h)
+                        
+                        for polygon in polygons:
+                            if len(polygon) >= 6:  # At least 3 points
+                                coords_str = ' '.join([f"{coord:.6f}" for coord in polygon])
+                                annotation = f"{class_id} {coords_str}"
+                                yolo_annotations.append(annotation)
+                    
+                    # Save files
+                    out_img = self.output_root / "segmentation" / split_name / "images" / img_file.name
+                    out_label = self.output_root / "segmentation" / split_name / "labels" / img_file.with_suffix('.txt').name
+                    
+                    shutil.copy2(img_file, out_img)
+                    
+                    with open(out_label, 'w') as f:
+                        f.write('\n'.join(yolo_annotations))
+                    
+                    total_processed += 1
+        
+        print(f"[OK] Segmentation: {total_processed} images processed")
+    
+    def process_3d_detection(self):
+        """Process 3D detection data (for specialized 3D models)"""
+        print("Processing 3D Detection...")
+        print("[WARNING] Standard YOLOv12 doesn't support 3D detection natively")
+        print("[INFO] Preparing data for 3D-aware models or future extensions")
+        
+        bbox_root = self.a2d2_root / "camera_lidar_semantic_bboxes"
+        sequences = list(bbox_root.glob("2018*"))
+        
+        if not sequences:
+            print("[ERROR] No bbox sequences found")
+            return
+        
+        # Split sequences
+        n_train = int(len(sequences) * 0.7)
+        n_val = int(len(sequences) * 0.15)
+        
+        splits = [
+            (sequences[:n_train], "train"),
+            (sequences[n_train:n_train+n_val], "val"),
+            (sequences[n_train+n_val:], "test")
+        ]
+        
+        total_processed = 0
+        
+        for seq_list, split_name in splits:
+            if not seq_list:
+                continue
+                
+            print(f"Processing {split_name} split...")
+            
+            for seq_dir in tqdm(seq_list, desc=f"{split_name}"):
+                camera_dir = seq_dir / "camera" / "cam_front_center"
+                label3d_dir = seq_dir / "label3D" / "cam_front_center"
+                lidar_dir = seq_dir / "lidar" / "cam_front_center"
+                
+                for img_file in camera_dir.glob("*.png"):
+                    label_file = label3d_dir / img_file.name.replace("camera", "label3D").replace(".png", ".json")
+                    lidar_file = lidar_dir / img_file.name.replace("camera", "lidar").replace(".png", ".npz")
+                    
+                    if not label_file.exists() or not lidar_file.exists():
+                        continue
+                    
+                    try:
                         # Load 3D annotations
                         with open(label_file, 'r') as f:
-                            label_data = json.load(f)
+                            annotations_3d = json.load(f)
                         
-                        annotations = []
+                        # Load LiDAR data
+                        lidar_data = np.load(lidar_file)
                         
-                        # Process each 3D bounding box
-                        for bbox_3d in label_data:
+                        # Process 3D annotations
+                        yolo_3d_annotations = []
+                        
+                        for bbox_3d in annotations_3d:
                             class_name = bbox_3d.get('class', 'unknown')
                             
-                            # Map class name to ID
-                            if isinstance(self.bbox_classes, dict):
-                                if class_name in self.bbox_classes:
-                                    class_id = list(self.bbox_classes.keys()).index(class_name)
-                                else:
-                                    continue
+                            if class_name in self.bbox_classes:
+                                class_id = self.bbox_classes.index(class_name)
                             else:
-                                class_id = 0  # Default class
+                                continue
                             
-                            # For simplified 2D conversion, create dummy bbox
-                            # In full implementation, you'd project 3D to 2D
                             center = bbox_3d.get('center', [0, 0, 0])
                             size = bbox_3d.get('size', [1, 1, 1])
+                            rotation = bbox_3d.get('rotation', [0, 0, 0])
                             
-                            # Create a simple 2D projection (placeholder)
-                            x_center = 0.5  # Center of image
-                            y_center = 0.5
-                            width = min(0.2, size[0] / 10)  # Scale based on 3D size
-                            height = min(0.2, size[1] / 10)
-                            
-                            annotation = f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
-                            annotations.append(annotation)
+                            # Format: class_id x y z l w h rotation_y
+                            annotation = f"{class_id} {center[0]:.6f} {center[1]:.6f} {center[2]:.6f} {size[0]:.6f} {size[1]:.6f} {size[2]:.6f} {rotation[2]:.6f}"
+                            yolo_3d_annotations.append(annotation)
                         
                         # Save files
-                        output_img_path = self.output_root / "2d_detection" / split_name / "images" / img_file.name
-                        output_label_path = self.output_root / "2d_detection" / split_name / "labels" / img_file.with_suffix('.txt').name
+                        out_img = self.output_root / "3d_detection" / split_name / "images" / img_file.name
+                        out_label = self.output_root / "3d_detection" / split_name / "labels" / img_file.with_suffix('.txt').name
+                        out_lidar = self.output_root / "3d_detection" / split_name / "point_clouds" / lidar_file.name
                         
-                        # Copy image
-                        shutil.copy2(img_file, output_img_path)
+                        shutil.copy2(img_file, out_img)
+                        shutil.copy2(lidar_file, out_lidar)
                         
-                        # Save annotations
-                        with open(output_label_path, 'w') as f:
-                            f.write('\n'.join(annotations))
+                        with open(out_label, 'w') as f:
+                            f.write('\n'.join(yolo_3d_annotations))
                         
-                        split_count += 1
                         total_processed += 1
                         
                     except Exception as e:
-                        print(f"[WARNING] Error processing {img_file.name}: {e}")
                         continue
-            
-            print(f"[OK] {split_name}: {split_count} images processed")
         
-        print(f"[OK] 2D detection complete: {total_processed} total images")
+        print(f"[OK] 3D detection: {total_processed} images processed")
     
-    def create_dataset_configs(self):
-        """Create YOLO dataset configuration files"""
-        print("\n" + "="*50)
-        print("CREATING DATASET CONFIGURATIONS")
-        print("="*50)
-        
+    def create_configs(self):
+        """Create dataset configuration files"""
         configs = {
+            '2d_detection_config.yaml': {
+                'path': str(self.output_root / '2d_detection'),
+                'train': 'train/images',
+                'val': 'val/images',
+                'test': 'test/images',
+                'nc': len(self.bbox_classes),
+                'names': self.bbox_classes
+            },
             'segmentation_config.yaml': {
                 'path': str(self.output_root / 'segmentation'),
                 'train': 'train/images',
@@ -426,13 +504,15 @@ class A2D2YOLOConverter:
                 'nc': len(self.semantic_classes),
                 'names': list(self.semantic_classes.keys())
             },
-            '2d_detection_config.yaml': {
-                'path': str(self.output_root / '2d_detection'),
+            '3d_detection_config.yaml': {
+                'path': str(self.output_root / '3d_detection'),
                 'train': 'train/images',
                 'val': 'val/images',
                 'test': 'test/images',
                 'nc': len(self.bbox_classes),
-                'names': list(self.bbox_classes.keys())
+                'names': self.bbox_classes,
+                'point_clouds': True,
+                'format': '3d'
             }
         }
         
@@ -444,36 +524,21 @@ class A2D2YOLOConverter:
     
     def run_conversion(self):
         """Run the complete conversion process"""
-        print("Starting A2D2 to YOLO conversion...")
-        print(f"Input: {self.a2d2_root}")
-        print(f"Output: {self.output_root}")
+        print("Starting Proper A2D2 to YOLO conversion...")
         
-        try:
-            # Process semantic segmentation
-            self.process_semantic_segmentation()
-            
-            # Process 2D detection
-            self.process_2d_detection()
-            
-            # Create dataset configurations
-            self.create_dataset_configs()
-            
-            print("\n" + "="*50)
-            print("           CONVERSION COMPLETED!")
-            print("="*50)
-            print(f"Converted data saved to: {self.output_root}")
-            
-        except Exception as e:
-            print(f"\n[ERROR] Error during conversion: {e}")
-            import traceback
-            traceback.print_exc()
+        # Process all tasks
+        self.process_2d_detection()
+        self.process_semantic_segmentation()
+        self.process_3d_detection()
+        
+        # Create configs
+        self.create_configs()
+        
+        print("\nConversion completed!")
+        print(f"Data saved to: {self.output_root}")
 
 def main():
-    """Main function"""
-    print("A2D2 to YOLO Converter - FIXED VERSION")
-    print("=" * 40)
-    
-    converter = A2D2YOLOConverter()
+    converter = ProperA2D2YOLOConverter()
     converter.run_conversion()
 
 if __name__ == "__main__":
