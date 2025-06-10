@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""
+Find missing labels in A2D2 dataset
+Compares image files with label files to find mismatches
+"""
+
+import os
+from pathlib import Path
+import argparse
+
+def get_file_stems(directory, extensions):
+    """Get file stems (without extension) from directory"""
+    stems = set()
+    for ext in extensions:
+        for file_path in Path(directory).glob(f"*.{ext}"):
+            stems.add(file_path.stem)
+    return stems
+
+def find_missing_files(images_dir, labels_dir, dataset_name="", split_name=""):
+    """Find missing labels or images"""
+    
+    print(f"\nChecking {dataset_name} - {split_name}:")
+    print(f"Images dir: {images_dir}")
+    print(f"Labels dir: {labels_dir}")
+    
+    # Check if directories exist
+    if not Path(images_dir).exists():
+        print(f"  ERROR: Images directory does not exist!")
+        return
+    
+    if not Path(labels_dir).exists():
+        print(f"  ERROR: Labels directory does not exist!")
+        return
+    
+    # Get image and label file stems
+    image_extensions = ['jpg', 'jpeg', 'png', 'bmp', 'tif', 'tiff']
+    label_extensions = ['txt']
+    
+    image_stems = get_file_stems(images_dir, image_extensions)
+    label_stems = get_file_stems(labels_dir, label_extensions)
+    
+    print(f"  Found {len(image_stems)} images")
+    print(f"  Found {len(label_stems)} labels")
+    
+    # Find missing files
+    missing_labels = image_stems - label_stems
+    missing_images = label_stems - image_stems
+    
+    # Report results
+    if len(missing_labels) == 0 and len(missing_images) == 0:
+        print(f"  ✓ All files match!")
+    else:
+        if missing_labels:
+            print(f"  Missing {len(missing_labels)} label file(s):")
+            for stem in sorted(missing_labels):
+                print(f"    - {stem}.txt")
+                
+        if missing_images:
+            print(f"  Missing {len(missing_images)} image file(s):")
+            for stem in sorted(missing_images):
+                print(f"    - {stem}.<img_ext>")
+    
+    return missing_labels, missing_images
+
+def check_dataset(base_path, dataset_type):
+    """Check a complete dataset (train/val/test splits)"""
+    
+    print(f"\n{'='*60}")
+    print(f"CHECKING {dataset_type.upper()} DATASET")
+    print(f"{'='*60}")
+    
+    dataset_path = Path(base_path) / dataset_type
+    
+    if not dataset_path.exists():
+        print(f"Dataset directory does not exist: {dataset_path}")
+        return
+    
+    splits = ['train', 'val', 'test']
+    all_missing_labels = {}
+    all_missing_images = {}
+    
+    for split in splits:
+        images_dir = dataset_path / split / "images"
+        labels_dir = dataset_path / split / "labels"
+        
+        missing_labels, missing_images = find_missing_files(
+            images_dir, labels_dir, dataset_type, split
+        )
+        
+        if missing_labels:
+            all_missing_labels[split] = missing_labels
+        if missing_images:
+            all_missing_images[split] = missing_images
+    
+    # Summary
+    print(f"\n{'-'*40}")
+    print(f"SUMMARY for {dataset_type}:")
+    
+    total_missing_labels = sum(len(v) for v in all_missing_labels.values())
+    total_missing_images = sum(len(v) for v in all_missing_images.values())
+    
+    if total_missing_labels == 0 and total_missing_images == 0:
+        print("  ✓ All datasets are complete!")
+    else:
+        if total_missing_labels > 0:
+            print(f"  Total missing labels: {total_missing_labels}")
+        if total_missing_images > 0:
+            print(f"  Total missing images: {total_missing_images}")
+    
+    return all_missing_labels, all_missing_images
+
+def create_dummy_labels(missing_labels_dict, base_path, dataset_type):
+    """Create dummy label files for missing labels"""
+    
+    print(f"\nCreating dummy label files for {dataset_type}...")
+    
+    for split, missing_stems in missing_labels_dict.items():
+        labels_dir = Path(base_path) / dataset_type / split / "labels"
+        
+        for stem in missing_stems:
+            label_file = labels_dir / f"{stem}.txt"
+            
+            # Create empty label file (image with no objects)
+            with open(label_file, 'w') as f:
+                pass  # Empty file
+            
+            print(f"  Created empty label: {label_file}")
+
+def main():
+    parser = argparse.ArgumentParser(description="Find missing labels in A2D2 dataset")
+    parser.add_argument("--base_path", default="/home/lambdaone/Emma/a2d2_yolo", 
+                       help="Base path to your data")
+    parser.add_argument("--dataset", choices=["2d_detection", "segmentation", "both"], 
+                       default="both", help="Which dataset to check")
+    parser.add_argument("--fix", action="store_true", 
+                       help="Create empty label files for missing labels")
+    parser.add_argument("--split", choices=["train", "val", "test", "all"], 
+                       default="all", help="Which split to check")
+    
+    args = parser.parse_args()
+    
+    print("MISSING LABELS FINDER")
+    print("="*60)
+    print(f"Base path: {args.base_path}")
+    print(f"Checking: {args.dataset}")
+    
+    # Check which datasets to process
+    datasets_to_check = []
+    if args.dataset in ["2d_detection", "both"]:
+        datasets_to_check.append("2d_detection")
+    if args.dataset in ["segmentation", "both"]:
+        datasets_to_check.append("segmentation")
+    
+    all_results = {}
+    
+    # Check each dataset
+    for dataset_type in datasets_to_check:
+        if args.split == "all":
+            missing_labels, missing_images = check_dataset(args.base_path, dataset_type)
+        else:
+            # Check specific split only
+            images_dir = Path(args.base_path) / dataset_type / args.split / "images"
+            labels_dir = Path(args.base_path) / dataset_type / args.split / "labels"
+            
+            missing_labels, missing_images = find_missing_files(
+                images_dir, labels_dir, dataset_type, args.split
+            )
+            
+            if missing_labels:
+                missing_labels = {args.split: missing_labels}
+            else:
+                missing_labels = {}
+                
+            if missing_images:
+                missing_images = {args.split: missing_images}
+            else:
+                missing_images = {}
+        
+        all_results[dataset_type] = {
+            'missing_labels': missing_labels,
+            'missing_images': missing_images
+        }
+        
+        # Create dummy labels if requested
+        if args.fix and missing_labels:
+            create_dummy_labels(missing_labels, args.base_path, dataset_type)
+    
+    # Final summary
+    print(f"\n{'='*60}")
+    print("FINAL SUMMARY")
+    print(f"{'='*60}")
+    
+    for dataset_type, results in all_results.items():
+        missing_labels = results['missing_labels']
+        missing_images = results['missing_images']
+        
+        total_missing_labels = sum(len(v) for v in missing_labels.values())
+        total_missing_images = sum(len(v) for v in missing_images.values())
+        
+        print(f"\n{dataset_type}:")
+        print(f"  Missing labels: {total_missing_labels}")
+        print(f"  Missing images: {total_missing_images}")
+        
+        if total_missing_labels > 0:
+            print(f"  Affected splits: {list(missing_labels.keys())}")
+        
+        if args.fix and total_missing_labels > 0:
+            print(f"  ✓ Created {total_missing_labels} empty label files")
+    
+    print(f"\n{'='*60}")
+    
+    # Give recommendations
+    print("\nRECOMMENDations:")
+    has_missing = any(
+        sum(len(v) for v in results['missing_labels'].values()) > 0 
+        for results in all_results.values()
+    )
+    
+    if has_missing:
+        if not args.fix:
+            print("1. Run with --fix to create empty label files")
+            print("2. Or manually create/copy the missing label files")
+        print("3. Re-run this script to verify all files are present")
+        print("4. Then start training")
+    else:
+        print("✓ All files are present - ready for training!")
+
+if __name__ == "__main__":
+    main()
