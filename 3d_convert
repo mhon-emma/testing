@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Specific converter for A2D2 3D bounding box data
-Based on your exact directory structure
+Fixed A2D2 converter for the actual JSON format used in your dataset
+Based on your exact label3D structure
 """
 
 import os
@@ -13,49 +13,24 @@ import shutil
 from tqdm import tqdm
 import yaml
 
-class A2D2BboxConverter:
+class FixedA2D2Converter:
     def __init__(self):
         self.a2d2_root = Path("/home/Lambdaone/Emma/a2d2_full")
         self.bbox_root = self.a2d2_root / "camera_lidar_semantic_bboxes"
         self.output_root = Path("/home/Lambdaone/Emma/a2d2_yolo")
         
-        # Load camera matrix
+        # Camera matrix from your config
         self.camera_matrix = np.array([
             [1687.34, 0, 965.43],
             [0, 1783.43, 684.42],
             [0, 0, 1]
         ])
         
-        # Load 3D classes
-        self.load_bbox_classes()
+        # A2D2 classes from your data
+        self.bbox_classes = ["Car", "VanSUV", "Truck", "Bus", "Pedestrian", "Bicycle", "TrafficSign", "TrafficLight"]
         
         # Setup output directories
         self.setup_output_directories()
-    
-    def load_bbox_classes(self):
-        """Load 3D bbox class definitions"""
-        class_file = self.bbox_root / "class_list.json"
-        
-        if class_file.exists():
-            try:
-                with open(class_file, 'r') as f:
-                    classes_data = json.load(f)
-                
-                if isinstance(classes_data, dict):
-                    self.bbox_classes = list(classes_data.keys())
-                elif isinstance(classes_data, list):
-                    self.bbox_classes = classes_data
-                else:
-                    self.bbox_classes = ["Car", "Pedestrian", "Bicycle", "Truck", "Bus"]
-                    
-                print(f"[OK] Loaded {len(self.bbox_classes)} bbox classes: {self.bbox_classes}")
-                
-            except Exception as e:
-                print(f"[ERROR] Loading bbox classes: {e}")
-                self.bbox_classes = ["Car", "Pedestrian", "Bicycle", "Truck", "Bus"]
-        else:
-            print("[WARNING] No bbox class file found, using defaults")
-            self.bbox_classes = ["Car", "Pedestrian", "Bicycle", "Truck", "Bus"]
     
     def setup_output_directories(self):
         """Setup output directories"""
@@ -66,126 +41,83 @@ class A2D2BboxConverter:
                 
                 if task == '3d_detection':
                     (self.output_root / task / split / 'point_clouds').mkdir(parents=True, exist_ok=True)
+        
+        print(f"[OK] Output directories ready")
     
-    def project_3d_to_2d_simple(self, center, size, img_width, img_height):
-        """Simple 3D to 2D projection"""
+    def parse_a2d2_labels(self, label_file):
+        """Parse your specific A2D2 label format"""
         try:
-            # Extract 3D center
-            x_3d, y_3d, z_3d = center
+            with open(label_file, 'r') as f:
+                data = json.load(f)
             
-            # Skip if behind camera
-            if z_3d <= 0:
-                return None
+            # Your format: {"box_0": {...}, "box_1": {...}}
+            objects = []
             
-            # Project center point to 2D
-            point_2d = self.camera_matrix @ np.array([x_3d, y_3d, z_3d])
+            for box_key, box_data in data.items():
+                if box_key.startswith('box_') and isinstance(box_data, dict):
+                    # Extract the data we need
+                    obj = {
+                        'class': box_data.get('class', 'unknown'),
+                        'center': box_data.get('center', [0, 0, 0]),
+                        'size': box_data.get('size', [1, 1, 1]),
+                        'rot_angle': box_data.get('rot_angle', 0.0),
+                        'alpha': box_data.get('alpha', 0.0),
+                        '2d_bbox': box_data.get('2d_bbox', [0, 0, 0, 0]),
+                        'occlusion': box_data.get('occlusion', 0.0),
+                        'truncation': box_data.get('truncation', 0.0)
+                    }
+                    objects.append(obj)
             
-            if point_2d[2] <= 0:
-                return None
-            
-            x_2d = point_2d[0] / point_2d[2]
-            y_2d = point_2d[1] / point_2d[2]
-            
-            # Check if within image bounds
-            if x_2d < 0 or x_2d >= img_width or y_2d < 0 or y_2d >= img_height:
-                return None
-            
-            # Estimate 2D box size from 3D size and distance
-            length, width, height = size
-            distance = z_3d
-            
-            # Simple projection of 3D size to 2D (rough estimate)
-            focal_length = self.camera_matrix[0, 0]
-            
-            # Project 3D dimensions to 2D pixels
-            box_width_2d = (width * focal_length) / distance
-            box_height_2d = (height * focal_length) / distance
-            
-            # Ensure reasonable box size
-            box_width_2d = max(10, min(box_width_2d, img_width / 2))
-            box_height_2d = max(10, min(box_height_2d, img_height / 2))
-            
-            # Calculate box bounds
-            x_min = max(0, x_2d - box_width_2d / 2)
-            y_min = max(0, y_2d - box_height_2d / 2)
-            x_max = min(img_width, x_2d + box_width_2d / 2)
-            y_max = min(img_height, y_2d + box_height_2d / 2)
-            
-            # Convert to YOLO format (normalized)
-            x_center = (x_min + x_max) / 2 / img_width
-            y_center = (y_min + y_max) / 2 / img_height
-            width_norm = (x_max - x_min) / img_width
-            height_norm = (y_max - y_min) / img_height
-            
-            # Validate
-            if 0 < width_norm < 1 and 0 < height_norm < 1:
-                return [x_center, y_center, width_norm, height_norm]
+            return objects
             
         except Exception as e:
-            print(f"[ERROR] Projection failed: {e}")
-        
-        return None
+            print(f"[ERROR] Parsing {label_file}: {e}")
+            return []
     
-    def inspect_sequence_data(self):
-        """Inspect what data we actually have"""
-        print("Inspecting A2D2 bbox sequences...")
-        
-        sequences = list(self.bbox_root.glob("2018*"))
-        print(f"Found {len(sequences)} sequences:")
-        
-        total_files = 0
-        
-        for seq in sequences:
-            print(f"\nSequence: {seq.name}")
+    def convert_2d_bbox_to_yolo(self, bbox_2d, img_width, img_height):
+        """Convert A2D2 2D bbox to YOLO format"""
+        try:
+            # A2D2 format: [x_min, y_min, x_max, y_max]
+            x_min, y_min, x_max, y_max = bbox_2d
             
-            # Check directories
-            camera_dir = seq / "camera" / "cam_front_center"
-            label3d_dir = seq / "label3D" / "cam_front_center"
-            lidar_dir = seq / "lidar" / "cam_front_center"
+            # Convert to YOLO format (center, width, height, normalized)
+            x_center = (x_min + x_max) / 2 / img_width
+            y_center = (y_min + y_max) / 2 / img_height
+            width = (x_max - x_min) / img_width
+            height = (y_max - y_min) / img_height
             
-            camera_files = list(camera_dir.glob("*.png")) if camera_dir.exists() else []
-            label3d_files = list(label3d_dir.glob("*.json")) if label3d_dir.exists() else []
-            lidar_files = list(lidar_dir.glob("*.npz")) if lidar_dir.exists() else []
-            
-            print(f"  Camera: {len(camera_files)} files")
-            print(f"  Label3D: {len(label3d_files)} files") 
-            print(f"  LiDAR: {len(lidar_files)} files")
-            
-            total_files += len(camera_files)
-            
-            # Check a sample label3D file
-            if label3d_files:
-                sample_label = label3d_files[0]
-                try:
-                    with open(sample_label, 'r') as f:
-                        label_data = json.load(f)
-                    
-                    print(f"  Sample label: {len(label_data)} objects")
-                    if label_data:
-                        first_obj = label_data[0]
-                        print(f"  Sample object keys: {list(first_obj.keys())}")
-                        print(f"  Sample class: {first_obj.get('class', 'unknown')}")
-                        
-                except Exception as e:
-                    print(f"  Error reading label: {e}")
-        
-        print(f"\nTotal images available: {total_files}")
-        return sequences
+            # Validate
+            if 0 <= x_center <= 1 and 0 <= y_center <= 1 and 0 < width <= 1 and 0 < height <= 1:
+                return [x_center, y_center, width, height]
+            else:
+                print(f"[WARNING] Invalid bbox: {bbox_2d} -> {[x_center, y_center, width, height]}")
+                return None
+                
+        except Exception as e:
+            print(f"[ERROR] Converting bbox {bbox_2d}: {e}")
+            return None
+    
+    def file_already_processed(self, img_file, split_name, task):
+        """Check if file already processed"""
+        out_img = self.output_root / task / split_name / "images" / img_file.name
+        out_label = self.output_root / task / split_name / "labels" / img_file.with_suffix('.txt').name
+        return out_img.exists() and out_label.exists()
     
     def process_2d_detection(self):
-        """Process 2D detection from 3D bbox data"""
+        """Process 2D detection using the existing 2D bboxes in your data"""
         print("\n" + "="*50)
-        print("PROCESSING 2D DETECTION FROM 3D BBOXES")
+        print("PROCESSING 2D DETECTION (Fixed Format)")
         print("="*50)
         
-        sequences = list(self.bbox_root.glob("2018*"))
+        sequences = sorted(list(self.bbox_root.glob("2018*")), key=lambda x: x.name)
         
         if not sequences:
             print("[ERROR] No sequences found!")
             return
         
+        print(f"Found {len(sequences)} sequences")
+        
         # Split sequences
-        sequences = sorted(sequences, key=lambda x: x.name)
         n_total = len(sequences)
         n_train = int(n_total * 0.7)
         n_val = int(n_total * 0.15)
@@ -197,6 +129,7 @@ class A2D2BboxConverter:
         ]
         
         total_processed = 0
+        total_skipped = 0
         
         for seq_list, split_name in splits:
             if not seq_list:
@@ -205,67 +138,72 @@ class A2D2BboxConverter:
             print(f"\nProcessing {split_name} split ({len(seq_list)} sequences)...")
             
             split_processed = 0
+            split_skipped = 0
             
             for seq_dir in tqdm(seq_list, desc=split_name):
                 camera_dir = seq_dir / "camera" / "cam_front_center"
                 label3d_dir = seq_dir / "label3D" / "cam_front_center"
                 
                 if not (camera_dir.exists() and label3d_dir.exists()):
-                    print(f"[SKIP] {seq_dir.name}: Missing directories")
                     continue
                 
                 # Process each image
                 for img_file in camera_dir.glob("*.png"):
-                    # Find corresponding 3D label
+                    # Find corresponding label3D file
                     base_name = img_file.stem
                     label_file = label3d_dir / f"{base_name.replace('camera', 'label3D')}.json"
                     
                     if not label_file.exists():
                         continue
                     
-                    # Check if already processed
-                    out_img = self.output_root / "2d_detection" / split_name / "images" / img_file.name
-                    out_label = self.output_root / "2d_detection" / split_name / "labels" / img_file.with_suffix('.txt').name
-                    
-                    if out_img.exists() and out_label.exists():
+                    # Skip if already processed
+                    if self.file_already_processed(img_file, split_name, "2d_detection"):
+                        split_skipped += 1
                         continue
                     
                     try:
-                        # Load image
+                        # Load image to get dimensions
                         img = cv2.imread(str(img_file))
                         if img is None:
                             continue
                         
                         h, w = img.shape[:2]
                         
-                        # Load 3D annotations
-                        with open(label_file, 'r') as f:
-                            bbox_data = json.load(f)
+                        # Parse A2D2 labels
+                        objects = self.parse_a2d2_labels(label_file)
                         
-                        # Convert 3D bboxes to 2D
+                        if not objects:
+                            continue
+                        
+                        # Convert to YOLO format
                         yolo_annotations = []
                         
-                        for bbox_3d in bbox_data:
-                            class_name = bbox_3d.get('class', 'unknown')
+                        for obj in objects:
+                            class_name = obj['class']
                             
                             # Map class to ID
                             if class_name in self.bbox_classes:
                                 class_id = self.bbox_classes.index(class_name)
                             else:
-                                continue
+                                # Add unknown classes
+                                if class_name not in self.bbox_classes:
+                                    self.bbox_classes.append(class_name)
+                                    class_id = len(self.bbox_classes) - 1
+                                else:
+                                    continue
                             
-                            # Get 3D bbox parameters
-                            center = bbox_3d.get('center', [0, 0, 0])
-                            size = bbox_3d.get('size', [1, 1, 1])
+                            # Use the existing 2D bbox from A2D2
+                            bbox_2d_a2d2 = obj['2d_bbox']
+                            bbox_yolo = self.convert_2d_bbox_to_yolo(bbox_2d_a2d2, w, h)
                             
-                            # Convert to 2D
-                            bbox_2d = self.project_3d_to_2d_simple(center, size, w, h)
-                            
-                            if bbox_2d:
-                                annotation = f"{class_id} {bbox_2d[0]:.6f} {bbox_2d[1]:.6f} {bbox_2d[2]:.6f} {bbox_2d[3]:.6f}"
+                            if bbox_yolo:
+                                annotation = f"{class_id} {bbox_yolo[0]:.6f} {bbox_yolo[1]:.6f} {bbox_yolo[2]:.6f} {bbox_yolo[3]:.6f}"
                                 yolo_annotations.append(annotation)
                         
                         # Save files
+                        out_img = self.output_root / "2d_detection" / split_name / "images" / img_file.name
+                        out_label = self.output_root / "2d_detection" / split_name / "labels" / img_file.with_suffix('.txt').name
+                        
                         shutil.copy2(img_file, out_img)
                         
                         with open(out_label, 'w') as f:
@@ -277,21 +215,22 @@ class A2D2BboxConverter:
                         print(f"[ERROR] Processing {img_file.name}: {e}")
                         continue
             
-            print(f"[OK] {split_name}: {split_processed} files processed")
+            print(f"[OK] {split_name}: {split_processed} processed, {split_skipped} skipped")
             total_processed += split_processed
+            total_skipped += split_skipped
         
-        print(f"\n[FINAL] 2D Detection: {total_processed} files processed")
+        print(f"\n[FINAL] 2D Detection: {total_processed} processed, {total_skipped} skipped")
+        print(f"[INFO] Found classes: {self.bbox_classes}")
     
     def process_3d_detection(self):
-        """Process 3D detection data"""
+        """Process 3D detection using your format"""
         print("\n" + "="*50)
-        print("PROCESSING 3D DETECTION")
+        print("PROCESSING 3D DETECTION (Fixed Format)")
         print("="*50)
         
-        sequences = list(self.bbox_root.glob("2018*"))
+        sequences = sorted(list(self.bbox_root.glob("2018*")), key=lambda x: x.name)
         
         # Split sequences
-        sequences = sorted(sequences, key=lambda x: x.name)
         n_total = len(sequences)
         n_train = int(n_total * 0.7)
         n_val = int(n_total * 0.15)
@@ -303,6 +242,7 @@ class A2D2BboxConverter:
         ]
         
         total_processed = 0
+        total_skipped = 0
         
         for seq_list, split_name in splits:
             if not seq_list:
@@ -311,6 +251,7 @@ class A2D2BboxConverter:
             print(f"\nProcessing {split_name} split ({len(seq_list)} sequences)...")
             
             split_processed = 0
+            split_skipped = 0
             
             for seq_dir in tqdm(seq_list, desc=split_name):
                 camera_dir = seq_dir / "camera" / "cam_front_center"
@@ -335,30 +276,33 @@ class A2D2BboxConverter:
                     out_lidar = self.output_root / "3d_detection" / split_name / "point_clouds" / lidar_file.name
                     
                     if all([out_img.exists(), out_label.exists(), out_lidar.exists()]):
+                        split_skipped += 1
                         continue
                     
                     try:
-                        # Load 3D annotations
-                        with open(label_file, 'r') as f:
-                            bbox_data = json.load(f)
+                        # Parse A2D2 labels
+                        objects = self.parse_a2d2_labels(label_file)
                         
-                        # Process 3D annotations
+                        if not objects:
+                            continue
+                        
+                        # Convert to YOLO 3D format
                         yolo_3d_annotations = []
                         
-                        for bbox_3d in bbox_data:
-                            class_name = bbox_3d.get('class', 'unknown')
+                        for obj in objects:
+                            class_name = obj['class']
                             
                             if class_name in self.bbox_classes:
                                 class_id = self.bbox_classes.index(class_name)
                             else:
                                 continue
                             
-                            center = bbox_3d.get('center', [0, 0, 0])
-                            size = bbox_3d.get('size', [1, 1, 1])
-                            rotation = bbox_3d.get('rotation', [0, 0, 0])
+                            center = obj['center']
+                            size = obj['size']
+                            rotation = obj.get('rot_angle', 0.0)
                             
                             # Format: class_id x y z l w h rotation_y
-                            annotation = f"{class_id} {center[0]:.6f} {center[1]:.6f} {center[2]:.6f} {size[0]:.6f} {size[1]:.6f} {size[2]:.6f} {rotation[2]:.6f}"
+                            annotation = f"{class_id} {center[0]:.6f} {center[1]:.6f} {center[2]:.6f} {size[0]:.6f} {size[1]:.6f} {size[2]:.6f} {rotation:.6f}"
                             yolo_3d_annotations.append(annotation)
                         
                         # Save files
@@ -374,10 +318,11 @@ class A2D2BboxConverter:
                         print(f"[ERROR] Processing {img_file.name}: {e}")
                         continue
             
-            print(f"[OK] {split_name}: {split_processed} files processed")
+            print(f"[OK] {split_name}: {split_processed} processed, {split_skipped} skipped")
             total_processed += split_processed
+            total_skipped += split_skipped
         
-        print(f"\n[FINAL] 3D Detection: {total_processed} files processed")
+        print(f"\n[FINAL] 3D Detection: {total_processed} processed, {total_skipped} skipped")
     
     def create_configs(self):
         """Create dataset configuration files"""
@@ -407,28 +352,55 @@ class A2D2BboxConverter:
                 yaml.dump(config_data, f, default_flow_style=False)
             print(f"[OK] Created: {config_path}")
     
+    def get_current_stats(self):
+        """Get current dataset statistics"""
+        stats = {}
+        for task in ['2d_detection', '3d_detection']:
+            stats[task] = {}
+            total = 0
+            for split in ['train', 'val', 'test']:
+                img_dir = self.output_root / task / split / "images"
+                count = len(list(img_dir.glob("*"))) if img_dir.exists() else 0
+                stats[task][split] = count
+                total += count
+            stats[task]['total'] = total
+        return stats
+    
     def run_conversion(self):
-        """Run the bbox-specific conversion"""
+        """Run the fixed conversion"""
         print("="*60)
-        print("A2D2 BBOX SPECIFIC CONVERTER")
+        print("FIXED A2D2 CONVERTER")
         print("="*60)
+        print(f"Input: {self.bbox_root}")
+        print(f"Output: {self.output_root}")
         
-        # Inspect data first
-        sequences = self.inspect_sequence_data()
+        # Show current stats
+        print("\nCurrent dataset status:")
+        stats = self.get_current_stats()
+        for task, task_stats in stats.items():
+            print(f"{task}: {task_stats['total']} files")
         
-        print(f"\nStarting conversion...")
-        
-        # Process both tasks
-        self.process_2d_detection()
-        self.process_3d_detection()
-        
-        # Create configs
-        self.create_configs()
-        
-        print("\n" + "="*60)
-        print("BBOX CONVERSION COMPLETED!")
-        print("="*60)
+        # Run conversion
+        try:
+            self.process_2d_detection()
+            self.process_3d_detection()
+            self.create_configs()
+            
+            print("\n" + "="*60)
+            print("CONVERSION COMPLETED!")
+            print("="*60)
+            
+            # Final stats
+            final_stats = self.get_current_stats()
+            for task, task_stats in final_stats.items():
+                print(f"{task}: {task_stats['total']} files")
+                print(f"  Train: {task_stats['train']}, Val: {task_stats['val']}, Test: {task_stats['test']}")
+            
+        except Exception as e:
+            print(f"\n[ERROR] Conversion failed: {e}")
+            import traceback
+            traceback.print_exc()
 
 if __name__ == "__main__":
-    converter = A2D2BboxConverter()
+    converter = FixedA2D2Converter()
     converter.run_conversion()
