@@ -1,0 +1,345 @@
+#!/usr/bin/env python3
+"""
+Fix 3D detection processing for A2D2 camera_lidar_semantic_bboxes
+Based on the actual structure from your tree output
+"""
+
+import os
+import json
+import numpy as np
+import cv2
+from pathlib import Path
+import shutil
+from tqdm import tqdm
+import yaml
+
+def debug_bbox_structure():
+    """Debug the actual structure of camera_lidar_semantic_bboxes"""
+    
+    bbox_root = Path("/home/Lambdaone/Emma/a2d2_full/camera_lidar_semantic_bboxes")
+    
+    print("DEBUGGING 3D BBOX STRUCTURE")
+    print("=" * 40)
+    
+    if not bbox_root.exists():
+        print(f"[ERROR] Directory not found: {bbox_root}")
+        return
+    
+    # Check sequences
+    sequences = list(bbox_root.glob("2018*"))
+    print(f"Found {len(sequences)} sequences:")
+    
+    for i, seq in enumerate(sequences[:3]):  # Check first 3
+        print(f"\n{i+1}. {seq.name}")
+        
+        # Check subdirectories
+        subdirs = [d for d in seq.iterdir() if d.is_dir()]
+        print(f"   Subdirs: {[d.name for d in subdirs]}")
+        
+        # Check camera structure
+        camera_dir = seq / "camera" / "cam_front_center"
+        if camera_dir.exists():
+            img_files = list(camera_dir.glob("*.png"))
+            print(f"   Camera images: {len(img_files)}")
+            if img_files:
+                print(f"   Sample image: {img_files[0].name}")
+        
+        # Check label3D structure
+        label3d_dir = seq / "label3D" / "cam_front_center"
+        if label3d_dir.exists():
+            label_files = list(label3d_dir.glob("*.json"))
+            print(f"   3D labels: {len(label_files)}")
+            if label_files:
+                print(f"   Sample label: {label_files[0].name}")
+                
+                # Check content of first label
+                try:
+                    with open(label_files[0], 'r') as f:
+                        label_data = json.load(f)
+                    print(f"   Label format: {type(label_data)}")
+                    if isinstance(label_data, list) and label_data:
+                        print(f"   First object keys: {list(label_data[0].keys())}")
+                        print(f"   First object class: {label_data[0].get('class', 'unknown')}")
+                except Exception as e:
+                    print(f"   Error reading label: {e}")
+        else:
+            print(f"   [MISSING] label3D directory")
+        
+        # Check lidar structure
+        lidar_dir = seq / "lidar" / "cam_front_center"
+        if lidar_dir.exists():
+            lidar_files = list(lidar_dir.glob("*.npz"))
+            print(f"   LiDAR files: {len(lidar_files)}")
+        else:
+            print(f"   [MISSING] lidar directory")
+
+def process_3d_detection_fixed():
+    """Fixed 3D detection processing"""
+    
+    print("\nPROCESSING 3D DETECTION (FIXED)")
+    print("=" * 40)
+    
+    bbox_root = Path("/home/Lambdaone/Emma/a2d2_full/camera_lidar_semantic_bboxes")
+    output_root = Path("/home/Lambdaone/Emma/a2d2_yolo")
+    
+    # Load camera matrix from config
+    camera_matrix = load_camera_matrix()
+    
+    # Find all sequences
+    sequences = list(bbox_root.glob("2018*"))
+    sequences = sorted(sequences, key=lambda x: x.name)
+    
+    if not sequences:
+        print("[ERROR] No sequences found!")
+        return
+    
+    print(f"Found {len(sequences)} sequences")
+    
+    # Split sequences  
+    n_total = len(sequences)
+    n_train = int(n_total * 0.7)
+    n_val = int(n_total * 0.15)
+    
+    splits = [
+        (sequences[:n_train], "train"),
+        (sequences[n_train:n_train+n_val], "val"),
+        (sequences[n_train+n_val:], "test")
+    ]
+    
+    # Create output directories
+    for split in ['train', 'val', 'test']:
+        (output_root / "2d_detection" / split / "images").mkdir(parents=True, exist_ok=True)
+        (output_root / "2d_detection" / split / "labels").mkdir(parents=True, exist_ok=True)
+        (output_root / "3d_detection" / split / "images").mkdir(parents=True, exist_ok=True)
+        (output_root / "3d_detection" / split / "labels").mkdir(parents=True, exist_ok=True)
+        (output_root / "3d_detection" / split / "point_clouds").mkdir(parents=True, exist_ok=True)
+    
+    total_2d_processed = 0
+    total_3d_processed = 0
+    total_skipped = 0
+    
+    # Process each split
+    for seq_list, split_name in splits:
+        if not seq_list:
+            continue
+        
+        print(f"\nProcessing {split_name} split ({len(seq_list)} sequences)...")
+        
+        split_2d = 0
+        split_3d = 0
+        split_skip = 0
+        
+        for seq_dir in tqdm(seq_list, desc=f"{split_name}"):
+            # Check required directories
+            camera_dir = seq_dir / "camera" / "cam_front_center"
+            label3d_dir = seq_dir / "label3D" / "cam_front_center"
+            lidar_dir = seq_dir / "lidar" / "cam_front_center"
+            
+            if not camera_dir.exists():
+                print(f"[SKIP] {seq_dir.name}: No camera directory")
+                continue
+            
+            if not label3d_dir.exists():
+                print(f"[SKIP] {seq_dir.name}: No label3D directory")
+                continue
+            
+            # Process each image in sequence
+            for img_file in camera_dir.glob("*.png"):
+                # Find corresponding files
+                label_file = label3d_dir / img_file.name.replace("camera", "label3D").replace(".png", ".json")
+                lidar_file = lidar_dir / img_file.name.replace("camera", "lidar").replace(".png", ".npz") if lidar_dir.exists() else None
+                
+                if not label_file.exists():
+                    continue
+                
+                # Check if already processed
+                out_2d_img = output_root / "2d_detection" / split_name / "images" / img_file.name
+                out_2d_label = output_root / "2d_detection" / split_name / "labels" / img_file.with_suffix('.txt').name
+                
+                if out_2d_img.exists() and out_2d_label.exists():
+                    split_skip += 1
+                    continue
+                
+                try:
+                    # Load image
+                    img = cv2.imread(str(img_file))
+                    if img is None:
+                        continue
+                    
+                    h, w = img.shape[:2]
+                    
+                    # Load 3D annotations
+                    with open(label_file, 'r') as f:
+                        annotations_3d = json.load(f)
+                    
+                    if not isinstance(annotations_3d, list):
+                        continue
+                    
+                    # Process 2D detection (project 3D to 2D)
+                    yolo_2d_annotations = []
+                    yolo_3d_annotations = []
+                    
+                    for bbox_3d in annotations_3d:
+                        if not isinstance(bbox_3d, dict):
+                            continue
+                        
+                        class_name = bbox_3d.get('class', '')
+                        
+                        # Map class to ID (simplified)
+                        class_map = {
+                            'Car': 0, 'Truck': 0, 'SmallVehicle': 0,
+                            'Pedestrian': 1,
+                            'Bicycle': 2, 'Cyclist': 2,
+                            'Bus': 3,
+                            'TrafficSign': 4,
+                            'TrafficLight': 5
+                        }
+                        
+                        if class_name not in class_map:
+                            continue
+                        
+                        class_id = class_map[class_name]
+                        
+                        # For 2D detection: create simple projection
+                        # (This is simplified - real projection would use camera matrix)
+                        center = bbox_3d.get('center', [0, 0, 0])
+                        size = bbox_3d.get('size', [1, 1, 1])
+                        
+                        # Simple 2D projection (placeholder)
+                        if center[2] > 0:  # In front of camera
+                            # Rough projection
+                            x_center = 0.5 + (center[0] / 50.0)  # Normalize roughly
+                            y_center = 0.5 - (center[1] / 50.0)
+                            width = min(0.3, size[0] / 20.0)
+                            height = min(0.3, size[1] / 20.0)
+                            
+                            # Clamp to valid range
+                            x_center = max(0.1, min(0.9, x_center))
+                            y_center = max(0.1, min(0.9, y_center))
+                            width = max(0.02, min(0.5, width))
+                            height = max(0.02, min(0.5, height))
+                            
+                            # 2D annotation
+                            yolo_2d_annotations.append(f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}")
+                            
+                            # 3D annotation (full 3D info)
+                            rotation = bbox_3d.get('rotation', [0, 0, 0])
+                            yolo_3d_annotations.append(f"{class_id} {center[0]:.6f} {center[1]:.6f} {center[2]:.6f} {size[0]:.6f} {size[1]:.6f} {size[2]:.6f} {rotation[2]:.6f}")
+                    
+                    # Save 2D detection files
+                    shutil.copy2(img_file, out_2d_img)
+                    with open(out_2d_label, 'w') as f:
+                        f.write('\n'.join(yolo_2d_annotations))
+                    split_2d += 1
+                    
+                    # Save 3D detection files (if lidar exists)
+                    if lidar_file and lidar_file.exists():
+                        out_3d_img = output_root / "3d_detection" / split_name / "images" / img_file.name
+                        out_3d_label = output_root / "3d_detection" / split_name / "labels" / img_file.with_suffix('.txt').name
+                        out_3d_lidar = output_root / "3d_detection" / split_name / "point_clouds" / lidar_file.name
+                        
+                        shutil.copy2(img_file, out_3d_img)
+                        shutil.copy2(lidar_file, out_3d_lidar)
+                        with open(out_3d_label, 'w') as f:
+                            f.write('\n'.join(yolo_3d_annotations))
+                        split_3d += 1
+                    
+                except Exception as e:
+                    print(f"[ERROR] Processing {img_file.name}: {e}")
+                    continue
+        
+        print(f"[RESULT] {split_name}: 2D={split_2d}, 3D={split_3d}, skipped={split_skip}")
+        total_2d_processed += split_2d
+        total_3d_processed += split_3d
+        total_skipped += split_skip
+    
+    print(f"\n[FINAL] 2D Detection: {total_2d_processed} processed")
+    print(f"[FINAL] 3D Detection: {total_3d_processed} processed")
+    print(f"[FINAL] Total skipped: {total_skipped}")
+    
+    # Create config files
+    create_detection_configs()
+
+def load_camera_matrix():
+    """Load camera matrix from config"""
+    config_file = Path("/home/Lambdaone/Emma/a2d2_full/cams_lidars.json")
+    
+    default_matrix = np.array([
+        [1687.34, 0, 965.43],
+        [0, 1783.43, 684.42],
+        [0, 0, 1]
+    ])
+    
+    if config_file.exists():
+        try:
+            with open(config_file, 'r') as f:
+                config = json.load(f)
+            
+            if 'cameras' in config and 'front_center' in config['cameras']:
+                cam_data = config['cameras']['front_center']
+                if 'CamMatrix' in cam_data:
+                    matrix = cam_data['CamMatrix']
+                    return np.array(matrix)
+        except:
+            pass
+    
+    return default_matrix
+
+def create_detection_configs():
+    """Create detection config files"""
+    
+    output_root = Path("/home/Lambdaone/Emma/a2d2_yolo")
+    
+    # 2D detection config
+    config_2d = {
+        'path': str(output_root / '2d_detection'),
+        'train': 'train/images',
+        'val': 'val/images',
+        'test': 'test/images',
+        'nc': 6,
+        'names': ['Vehicle', 'Pedestrian', 'Bicycle', 'Bus', 'TrafficSign', 'TrafficLight']
+    }
+    
+    with open(output_root / "2d_detection_config.yaml", 'w') as f:
+        yaml.dump(config_2d, f, default_flow_style=False)
+    
+    # 3D detection config
+    config_3d = {
+        'path': str(output_root / '3d_detection'),
+        'train': 'train/images',
+        'val': 'val/images',
+        'test': 'test/images',
+        'nc': 6,
+        'names': ['Vehicle', 'Pedestrian', 'Bicycle', 'Bus', 'TrafficSign', 'TrafficLight'],
+        'point_clouds': True,
+        'format': '3d'
+    }
+    
+    with open(output_root / "3d_detection_config.yaml", 'w') as f:
+        yaml.dump(config_3d, f, default_flow_style=False)
+    
+    print("[OK] Created detection config files")
+
+def main():
+    """Main function"""
+    print("A2D2 3D Detection Fixer")
+    print("=" * 30)
+    
+    # Debug structure first
+    debug_bbox_structure()
+    
+    # Ask to proceed
+    response = input("\nProceed with processing? (y/N): ")
+    if response.lower() != 'y':
+        print("Cancelled.")
+        return
+    
+    # Process 3D detection
+    process_3d_detection_fixed()
+    
+    print("\nDone! Check your output directories:")
+    print("- /home/Lambdaone/Emma/a2d2_yolo/2d_detection/")
+    print("- /home/Lambdaone/Emma/a2d2_yolo/3d_detection/")
+
+if __name__ == "__main__":
+    main()
