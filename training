@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""
+A2D2 Training Script - Works with your existing data structure
+"""
+
+import os
+import sys
+from pathlib import Path
+import yaml
+from ultralytics import YOLO
+import argparse
+import torch
+import subprocess
+
+class A2D2Trainer:
+    def __init__(self, base_path="/home/lambdaone/Emma/a2d2_yolo"):
+        self.base_path = Path(base_path)
+        self.detection_path = self.base_path / "2d_detection"
+        self.segmentation_path = self.base_path / "segmentation"
+        self.models_path = self.base_path / "models"
+        self.runs_path = self.base_path / "runs"
+        
+        # Create output directories
+        self.models_path.mkdir(exist_ok=True)
+        self.runs_path.mkdir(exist_ok=True)
+        
+        # Fix your YAML configs
+        self.fix_yaml_configs()
+        
+    def fix_yaml_configs(self):
+        """Fix the YAML configuration files"""
+        # Fix 2D detection config
+        detection_config = {
+            'names': {
+                0: 'Vehicle',
+                1: 'Pedestrian', 
+                2: 'Bicycle',
+                3: 'BUS',
+                4: 'TrafficSign',
+                5: 'TrafficLight'
+            },
+            'nc': 6,
+            'path': str(self.detection_path.absolute()),
+            'train': 'train/images',
+            'val': 'val/images',
+            'test': 'test/images'
+        }
+        
+        detection_yaml = self.base_path / "2d_detection_config.yaml"
+        with open(detection_yaml, 'w') as f:
+            yaml.dump(detection_config, f, default_flow_style=False)
+        print(f"Fixed: {detection_yaml}")
+        
+        # Fix segmentation config
+        segmentation_config = {
+            'names': {
+                0: 'Vehicle',
+                1: 'Pedestrian',
+                2: 'Bicycle', 
+                3: 'BUS',
+                4: 'TrafficSign',
+                5: 'TrafficLight'
+            },
+            'nc': 6,
+            'path': str(self.segmentation_path.absolute()),
+            'train': 'train/images',
+            'val': 'val/images', 
+            'test': 'test/images'
+        }
+        
+        segmentation_yaml = self.base_path / "segmentation_config.yaml"
+        with open(segmentation_yaml, 'w') as f:
+            yaml.dump(segmentation_config, f, default_flow_style=False)
+        print(f"Fixed: {segmentation_yaml}")
+    
+    def check_data_integrity(self):
+        """Check if data exists and is properly formatted"""
+        print("Checking data integrity...")
+        
+        # Check 2D detection data
+        detection_issues = []
+        for split in ['train', 'val', 'test']:
+            img_dir = self.detection_path / split / "images"
+            label_dir = self.detection_path / split / "labels"
+            
+            if not img_dir.exists():
+                detection_issues.append(f"Missing: {img_dir}")
+            if not label_dir.exists():
+                detection_issues.append(f"Missing: {label_dir}")
+            else:
+                # Count files
+                img_files = list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.png"))
+                label_files = list(label_dir.glob("*.txt"))
+                print(f"Detection {split}: {len(img_files)} images, {len(label_files)} labels")
+                
+                if len(img_files) != len(label_files):
+                    detection_issues.append(f"Mismatch in {split}: {len(img_files)} images vs {len(label_files)} labels")
+        
+        # Check segmentation data
+        segmentation_issues = []
+        for split in ['train', 'val', 'test']:
+            img_dir = self.segmentation_path / split / "images"
+            label_dir = self.segmentation_path / split / "labels"
+            
+            if img_dir.exists() and label_dir.exists():
+                img_files = list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.png"))
+                label_files = list(label_dir.glob("*.txt"))
+                print(f"Segmentation {split}: {len(img_files)} images, {len(label_files)} labels")
+        
+        if detection_issues:
+            print("Detection data issues:")
+            for issue in detection_issues:
+                print(f"  - {issue}")
+        
+        if segmentation_issues:
+            print("Segmentation data issues:")
+            for issue in segmentation_issues:
+                print(f"  - {issue}")
+                
+        return len(detection_issues) == 0, len(segmentation_issues) == 0
+    
+    def train_2d_detection(self, model_size='n', epochs=100, batch_size=16, device=0):
+        """Train 2D detection model"""
+        print(f"\n{'='*60}")
+        print("STARTING 2D DETECTION TRAINING")
+        print(f"{'='*60}")
+        
+        # Load YOLOv12 model
+        model_name = f'yolo11{model_size}.pt'  # YOLOv12 uses yolo11 prefix
+        model = YOLO(model_name)
+        
+        # Training parameters
+        train_args = {
+            'data': str(self.base_path / "2d_detection_config.yaml"),
+            'epochs': epochs,
+            'batch': batch_size,
+            'imgsz': 640,
+            'device': device,
+            'workers': 8,
+            'project': str(self.runs_path),
+            'name': f'detection_yolo11{model_size}',
+            'save_period': 10,
+            'val': True,
+            'plots': True,
+            'verbose': True,
+            'patience': 20,
+            'save': True,
+            'cache': True
+        }
+        
+        print(f"Training with parameters: {train_args}")
+        
+        try:
+            # Start training
+            results = model.train(**train_args)
+            
+            # Save the best model
+            best_model_path = self.models_path / f"detection_best_yolo11{model_size}.pt"
+            model.save(str(best_model_path))
+            
+            print(f"Detection training completed!")
+            print(f"Best model saved to: {best_model_path}")
+            print(f"Results saved to: {self.runs_path}/detection_yolo11{model_size}")
+            
+            return results, str(best_model_path)
+            
+        except Exception as e:
+            print(f"❌ Training failed: {e}")
+            return None, None
+    
+    def train_segmentation(self, model_size='n', epochs=100, batch_size=8, device=0):
+        """Train segmentation model"""
+        print(f"\n{'='*60}")
+        print("STARTING SEGMENTATION TRAINING")
+        print(f"{'='*60}")
+        
+        # Load YOLOv12 segmentation model
+        model_name = f'yolo11{model_size}-seg.pt'
+        model = YOLO(model_name)
+        
+        # Training parameters  
+        train_args = {
+            'data': str(self.base_path / "segmentation_config.yaml"),
+            'epochs': epochs,
+            'batch': batch_size,
+            'imgsz': 640,
+            'device': device,
+            'workers': 8,
+            'project': str(self.runs_path),
+            'name': f'segmentation_yolo11{model_size}',
+            'save_period': 10,
+            'val': True,
+            'plots': True,
+            'verbose': True,
+            'patience': 20,
+            'save': True,
+            'cache': True
+        }
+        
+        print(f"Training with parameters: {train_args}")
+        
+        try:
+            # Start training
+            results = model.train(**train_args)
+            
+            # Save the best model
+            best_model_path = self.models_path / f"segmentation_best_yolov8{model_size}.pt"
+            model.save(str(best_model_path))
+            
+            print(f"✅ Segmentation training completed!")
+            print(f"📁 Best model saved to: {best_model_path}")
+            print(f"📊 Results saved to: {self.runs_path}/segmentation_yolov8{model_size}")
+            
+            return results, str(best_model_path)
+            
+        except Exception as e:
+            print(f"❌ Segmentation training failed: {e}")
+            return None, None
+    
+    def validate_model(self, model_path, config_path):
+        """Validate trained model"""
+        print(f"\n{'='*60}")
+        print("VALIDATING MODEL")
+        print(f"{'='*60}")
+        
+        model = YOLO(model_path)
+        results = model.val(data=config_path)
+        
+        print("Validation Results:")
+        print(f"mAP50: {results.box.map50}")
+        print(f"mAP50-95: {results.box.map}")
+        
+        return results
+    
+    def run_inference(self, model_path, source_path, save_dir=None):
+        """Run inference on test images"""
+        if save_dir is None:
+            save_dir = self.runs_path / "inference"
+        
+        model = YOLO(model_path)
+        results = model.predict(
+            source=source_path,
+            save=True,
+            save_txt=True,
+            save_conf=True,
+            project=str(save_dir),
+            name="test_results"
+        )
+        
+        print(f"Inference results saved to: {save_dir}/test_results")
+        return results
+    
+    def print_system_info(self):
+        """Print system information"""
+        print(f"\n{'='*60}")
+        print("SYSTEM INFORMATION")
+        print(f"{'='*60}")
+        print(f"PyTorch version: {torch.__version__}")
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            print(f"CUDA version: {torch.version.cuda}")
+            print(f"GPU count: {torch.cuda.device_count()}")
+            for i in range(torch.cuda.device_count()):
+                print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
+        print(f"Base path: {self.base_path}")
+        print(f"{'='*60}\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="A2D2 YOLO Training")
+    parser.add_argument("--task", choices=["detection", "segmentation", "both"], 
+                       default="both", help="Which task to train")
+    parser.add_argument("--model", choices=["n", "s", "m", "l", "x"], 
+                       default="n", help="Model size")
+    parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
+    parser.add_argument("--batch", type=int, default=16, help="Batch size")
+    parser.add_argument("--device", default=0, help="Device to use (0 for GPU, 'cpu' for CPU)")
+    parser.add_argument("--base_path", default="/home/lambdaone/Emma/a2d2_yolo", 
+                       help="Base path to your data")
+    
+    args = parser.parse_args()
+    
+    # Initialize trainer
+    trainer = A2D2Trainer(args.base_path)
+    
+    # Print system info
+    trainer.print_system_info()
+    
+    # Check data integrity
+    detection_ok, segmentation_ok = trainer.check_data_integrity()
+    
+    if not detection_ok and args.task in ["detection", "both"]:
+        print("Detection data has issues. Please fix before training.")
+        return
+    
+    if not segmentation_ok and args.task in ["segmentation", "both"]:
+        print("Segmentation data has issues. Please fix before training.")
+        return
+    
+    # Train models
+    if args.task in ["detection", "both"]:
+        print("Starting 2D detection training...")
+        det_results, det_model = trainer.train_2d_detection(
+            model_size=args.model,
+            epochs=args.epochs,
+            batch_size=args.batch,
+            device=args.device
+        )
+        
+        if det_model:
+            # Validate the model
+            trainer.validate_model(det_model, trainer.base_path / "2d_detection_config.yaml")
+    
+    if args.task in ["segmentation", "both"]:
+        print("Starting segmentation training...")
+        seg_results, seg_model = trainer.train_segmentation(
+            model_size=args.model,
+            epochs=args.epochs,
+            batch_size=args.batch // 2,  # Smaller batch for segmentation
+            device=args.device
+        )
+        
+        if seg_model:
+            # Validate the model
+            trainer.validate_model(seg_model, trainer.base_path / "segmentation_config.yaml")
+    
+    print(f"\n{'='*60}")
+    print("TRAINING COMPLETED!")
+    print(f"{'='*60}")
+    print("Check the results in:")
+    print(f"  - Models: {trainer.models_path}")
+    print(f"  - Training logs: {trainer.runs_path}")
+    print(f"{'='*60}")
+
+
+if __name__ == "__main__":
+    main()
