@@ -235,31 +235,50 @@ class A2D2Converter:
         
         return sorted(list(classes))
     
-    def convert_to_coco_format(self, output_file: str):
-        """Convert A2D2 to COCO format"""
-        coco_data = {
-            "images": [],
-            "annotations": [],
-            "categories": []
-        }
+    def convert_to_coco_format(self, output_file: str, resume: bool = True):
+        """Convert A2D2 to COCO format with resume capability"""
+        # Check if output file exists and resume is enabled
+        if resume and Path(output_file).exists():
+            print(f"Found existing file {output_file}, loading for resume...")
+            try:
+                with open(output_file, 'r') as f:
+                    coco_data = json.load(f)
+                print(f"Resuming from: {len(coco_data['images'])} images, {len(coco_data['annotations'])} annotations")
+                
+                # Get already processed files
+                processed_files = {img['file_name'] for img in coco_data['images']}
+                image_id = max([img['id'] for img in coco_data['images']], default=0)
+                annotation_id = max([ann['id'] for ann in coco_data['annotations']], default=0)
+            except:
+                print("Error loading existing file, starting fresh...")
+                coco_data = {"images": [], "annotations": [], "categories": []}
+                processed_files = set()
+                image_id = 0
+                annotation_id = 0
+        else:
+            coco_data = {"images": [], "annotations": [], "categories": []}
+            processed_files = set()
+            image_id = 0
+            annotation_id = 0
         
         # Get unique classes from the dataset
         unique_classes = self.get_unique_classes()
         print(f"Found classes: {unique_classes}")
         
-        # Create categories
-        category_map = {}
-        for idx, class_name in enumerate(unique_classes):
-            category_id = idx + 1
-            coco_data["categories"].append({
-                "id": category_id,
-                "name": class_name,
-                "supercategory": "object"
-            })
-            category_map[class_name] = category_id
-        
-        image_id = 0
-        annotation_id = 0
+        # Create categories (only if not resuming or categories empty)
+        if not coco_data["categories"]:
+            category_map = {}
+            for idx, class_name in enumerate(unique_classes):
+                category_id = idx + 1
+                coco_data["categories"].append({
+                    "id": category_id,
+                    "name": class_name,
+                    "supercategory": "object"
+                })
+                category_map[class_name] = category_id
+        else:
+            # Build category map from existing categories
+            category_map = {cat['name']: cat['id'] for cat in coco_data["categories"]}
         
         # Process each sequence
         for sequence_dir in self.bbox_path.iterdir():
@@ -276,6 +295,11 @@ class A2D2Converter:
             
             # Process each image in the sequence
             for img_file in camera_dir.glob("*.png"):
+                # Check if already processed
+                file_name = f"{sequence_dir.name}_{img_file.name}"
+                if file_name in processed_files:
+                    continue
+                    
                 image_id += 1
                 
                 # Get corresponding JSON files
@@ -298,7 +322,7 @@ class A2D2Converter:
                 # Add image info
                 coco_data["images"].append({
                     "id": image_id,
-                    "file_name": f"{sequence_dir.name}_{img_file.name}",
+                    "file_name": file_name,
                     "width": width,
                     "height": height,
                     "sequence": sequence_dir.name
@@ -322,6 +346,12 @@ class A2D2Converter:
                             "truncation": ann.get('truncation', 0.0),
                             "occlusion": ann.get('occlusion', 0.0)
                         })
+                
+                # Save progress every 100 images
+                if image_id % 100 == 0:
+                    with open(output_file, 'w') as f:
+                        json.dump(coco_data, f, indent=2)
+                    print(f"Progress saved: {image_id} images processed")
         
         # Save COCO format
         with open(output_file, 'w') as f:
@@ -332,8 +362,8 @@ class A2D2Converter:
         print(f"Total annotations: {len(coco_data['annotations'])}")
         print(f"Categories: {[cat['name'] for cat in coco_data['categories']]}")
     
-    def convert_to_yolo_format(self, output_dir: str):
-        """Convert A2D2 to YOLO format"""
+    def convert_to_yolo_format(self, output_dir: str, resume: bool = True):
+        """Convert A2D2 to YOLO format with resume capability"""
         output_path = Path(output_dir)
         output_path.mkdir(exist_ok=True)
         
@@ -342,12 +372,21 @@ class A2D2Converter:
         print(f"Found classes: {unique_classes}")
         
         # Create class names file
-        with open(output_path / "classes.txt", 'w') as f:
+        classes_file = output_path / "classes.txt"
+        with open(classes_file, 'w') as f:
             for class_name in unique_classes:
                 f.write(f"{class_name}\n")
         
         # Create class mapping
         class_to_id = {name: idx for idx, name in enumerate(unique_classes)}
+        
+        # Get already processed files if resuming
+        processed_files = set()
+        if resume:
+            existing_files = list(output_path.glob("*.txt"))
+            processed_files = {f.stem for f in existing_files if f.name != "classes.txt"}
+            if processed_files:
+                print(f"Resuming: found {len(processed_files)} already processed files")
         
         image_count = 0
         annotation_count = 0
@@ -368,6 +407,12 @@ class A2D2Converter:
             # Process each image in the sequence
             for img_file in camera_dir.glob("*.png"):
                 base_name = img_file.stem
+                file_key = f"{sequence_dir.name}_{base_name}"
+                
+                # Skip if already processed
+                if file_key in processed_files:
+                    continue
+                    
                 label3d_json = label3d_dir / f"{base_name}.json"
                 
                 if not label3d_json.exists():
@@ -386,7 +431,7 @@ class A2D2Converter:
                 annotations = self.process_3d_labels(str(label3d_json), "front_center", img_width, img_height)
                 
                 # Create YOLO annotation file
-                yolo_file = output_path / f"{sequence_dir.name}_{base_name}.txt"
+                yolo_file = output_path / f"{file_key}.txt"
                 
                 with open(yolo_file, 'w') as f:
                     for ann in annotations:
@@ -404,6 +449,10 @@ class A2D2Converter:
                             annotation_count += 1
                 
                 image_count += 1
+                
+                # Print progress
+                if image_count % 100 == 0:
+                    print(f"Processed {image_count} images, {annotation_count} annotations")
         
         print(f"\nYOLO format saved to {output_dir}")
         print(f"Total images: {image_count}")
@@ -416,8 +465,8 @@ if __name__ == "__main__":
     # Initialize converter with your A2D2 dataset path
     converter = A2D2Converter("/path/to/your/a2d2/dataset")
     
-    # Convert to COCO format
-    converter.convert_to_coco_format("a2d2_coco.json")
+    # Convert to COCO format (with resume capability)
+    converter.convert_to_coco_format("a2d2_coco.json", resume=True)
     
-    # Convert to YOLO format
-    converter.convert_to_yolo_format("a2d2_yolo")
+    # Convert to YOLO format (with resume capability)
+    converter.convert_to_yolo_format("a2d2_yolo", resume=True)
