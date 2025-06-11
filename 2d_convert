@@ -1,213 +1,423 @@
-#!/usr/bin/env python3
-"""
-Generate 2D detection data from existing semantic segmentation results
-This works with the sequences you already have processed
-"""
-
-import os
 import json
+import os
 import numpy as np
-import cv2
 from pathlib import Path
-import shutil
-from tqdm import tqdm
+import cv2
+from typing import Dict, List, Tuple
 
-def convert_segmentation_to_detection():
-    """Convert existing segmentation masks to 2D bounding boxes"""
-    
-    # Paths
-    seg_root = Path("/home/Lambdaone/Emma/a2d2_yolo/segmentation")
-    det_root = Path("/home/Lambdaone/Emma/a2d2_yolo/2d_detection")
-    
-    print("Converting segmentation data to 2D detection...")
-    
-    # Class mapping (simplified automotive classes)
-    important_classes = {
-        0: "Car",
-        1: "Pedestrian", 
-        2: "Bicycle",
-        3: "Road",
-        4: "Building",
-        5: "Vegetation",
-        6: "Sky",
-        7: "Sidewalk"
-    }
-    
-    # Only detect vehicles, people, bikes (not static objects)
-    detection_classes = [0, 1, 2]  # Car, Pedestrian, Bicycle
-    
-    total_converted = 0
-    
-    for split in ['train', 'val', 'test']:
-        print(f"\nProcessing {split} split...")
+class A2D2Converter:
+    def __init__(self, a2d2_root_path: str):
+        self.root_path = Path(a2d2_root_path)
+        self.bbox_path = self.root_path / "camera_lidar_semantic_bboxes"
         
-        seg_img_dir = seg_root / split / "images"
-        seg_label_dir = seg_root / split / "labels"
+        # Load class list from the semantic dataset
+        semantic_class_file = self.root_path / "camera_lidar_semantic" / "class_list.json"
+        bbox_class_file = self.bbox_path / "class_list.json"
         
-        det_img_dir = det_root / split / "images"
-        det_label_dir = det_root / split / "labels"
+        # Use whichever class file exists
+        if bbox_class_file.exists():
+            with open(bbox_class_file, 'r') as f:
+                self.class_list = json.load(f)
+        elif semantic_class_file.exists():
+            with open(semantic_class_file, 'r') as f:
+                self.class_list = json.load(f)
+        else:
+            # Default classes based on A2D2 documentation
+            self.class_list = {
+                "Car": "Car",
+                "VanSUV": "VanSUV", 
+                "Truck": "Truck",
+                "Pedestrian": "Pedestrian",
+                "Bicycle": "Bicycle",
+                "MotorBike": "MotorBike",
+                "Bus": "Bus"
+            }
         
-        # Create detection directories
-        det_img_dir.mkdir(parents=True, exist_ok=True)
-        det_label_dir.mkdir(parents=True, exist_ok=True)
-        
-        if not seg_img_dir.exists():
-            print(f"  {split}: No segmentation data found")
-            continue
-        
-        split_converted = 0
-        
-        # Process each image
-        for img_file in tqdm(list(seg_img_dir.glob("*.png")), desc=f"{split}"):
-            label_file = seg_label_dir / img_file.with_suffix('.txt').name
+        # Load camera configuration
+        config_file = self.root_path / "cams_lidars.json"
+        if config_file.exists():
+            with open(config_file, 'r') as f:
+                self.config = json.load(f)
+        else:
+            self.config = None
+            print("Warning: cams_lidars.json not found. Will use image dimensions from files.")
+    
+    def project_3d_to_2d(self, points_3d: np.ndarray, camera_name: str) -> Tuple[np.ndarray, np.ndarray]:
+        """Project 3D points to 2D using camera intrinsics"""
+        if self.config is None:
+            print("Warning: No camera config available")
+            return np.array([]), np.array([])
             
-            if not label_file.exists():
+        # Get camera intrinsic matrix (undistorted)
+        cam_matrix = np.array(self.config['cameras'][camera_name]['CamMatrix'])
+        
+        # Filter out points behind the camera (z > 0 in camera coordinates)
+        valid_mask = points_3d[:, 2] > 0
+        valid_points = points_3d[valid_mask]
+        
+        if len(valid_points) == 0:
+            return np.array([]), valid_mask
+        
+        # Project to 2D
+        points_2d_homogeneous = cam_matrix @ valid_points.T
+        points_2d = (points_2d_homogeneous[:2] / points_2d_homogeneous[2]).T
+        
+        return points_2d, valid_mask
+    
+    def extract_2d_bbox_from_3d_points(self, points_3d: List, camera_name: str, img_width: int, img_height: int) -> List:
+        """Extract 2D bounding box from 3D corner points"""
+        if not points_3d or len(points_3d) != 8:
+            return []
+            
+        # Convert to numpy array
+        corners_3d = np.array(points_3d)
+        
+        # Project to 2D
+        corners_2d, valid_mask = self.project_3d_to_2d(corners_3d, camera_name)
+        
+        if len(corners_2d) == 0:
+            return []
+        
+        # Get bounding box from projected corners
+        x_coords = corners_2d[:, 0]
+        y_coords = corners_2d[:, 1]
+        
+        x_min, x_max = np.min(x_coords), np.max(x_coords)
+        y_min, y_max = np.min(y_coords), np.max(y_coords)
+        
+        # Clamp to image bounds
+        x_min = max(0, min(x_min, img_width))
+        x_max = max(0, min(x_max, img_width))
+        y_min = max(0, min(y_min, img_height))
+        y_max = max(0, min(y_max, img_height))
+        
+        # Only return valid bounding boxes
+        if x_max > x_min and y_max > y_min:
+            return [x_min, y_min, x_max - x_min, y_max - y_min]  # [x, y, width, height]
+        
+        return []
+    
+    def process_3d_labels(self, label3d_file: str, camera_name: str, img_width: int, img_height: int) -> List[Dict]:
+        """Process 3D bounding box labels from A2D2 format"""
+        try:
+            with open(label3d_file, 'r') as f:
+                label3d_data = json.load(f)
+        except:
+            return []
+        
+        annotations = []
+        
+        # Process each bounding box in the file
+        for box_key, box_data in label3d_data.items():
+            if not box_key.startswith('box_'):
+                continue
+                
+            # Get class name
+            class_name = box_data.get('class', 'Unknown')
+            
+            # Method 1: Use provided 2d_bbox if available and valid
+            if '2d_bbox' in box_data and len(box_data['2d_bbox']) == 4:
+                x_min, y_min, x_max, y_max = box_data['2d_bbox']
+                bbox_2d = [x_min, y_min, x_max - x_min, y_max - y_min]
+            
+            # Method 2: Project 3D points to 2D if 3d_points available
+            elif '3d_points' in box_data:
+                bbox_2d = self.extract_2d_bbox_from_3d_points(
+                    box_data['3d_points'], camera_name, img_width, img_height
+                )
+            
+            # Method 3: Use center and size to estimate 3D corners, then project
+            elif 'center' in box_data and 'size' in box_data:
+                center = np.array(box_data['center'])
+                size = np.array(box_data['size'])
+                
+                # Create 8 corners of 3D box
+                half_size = size / 2
+                corners_3d = np.array([
+                    center + [-half_size[0], -half_size[1], -half_size[2]],
+                    center + [+half_size[0], -half_size[1], -half_size[2]],
+                    center + [+half_size[0], +half_size[1], -half_size[2]],
+                    center + [-half_size[0], +half_size[1], -half_size[2]],
+                    center + [-half_size[0], -half_size[1], +half_size[2]],
+                    center + [+half_size[0], -half_size[1], +half_size[2]],
+                    center + [+half_size[0], +half_size[1], +half_size[2]],
+                    center + [-half_size[0], +half_size[1], +half_size[2]],
+                ])
+                
+                # Apply rotation if available
+                if 'axis' in box_data and 'rot_angle' in box_data:
+                    axis = np.array(box_data['axis'])
+                    angle = box_data['rot_angle']
+                    
+                    # Create rotation matrix from axis-angle
+                    if np.linalg.norm(axis) > 0:
+                        axis = axis / np.linalg.norm(axis)
+                        cos_angle = np.cos(angle)
+                        sin_angle = np.sin(angle)
+                        
+                        # Rodrigues' rotation formula
+                        rotation_matrix = (cos_angle * np.eye(3) + 
+                                         sin_angle * self._skew_symmetric(axis) +
+                                         (1 - cos_angle) * np.outer(axis, axis))
+                        
+                        # Apply rotation to each corner
+                        corners_3d = (rotation_matrix @ (corners_3d - center).T).T + center
+                
+                # Project to 2D
+                corners_2d, valid_mask = self.project_3d_to_2d(corners_3d, camera_name)
+                
+                if len(corners_2d) > 0:
+                    x_coords = corners_2d[:, 0]
+                    y_coords = corners_2d[:, 1]
+                    
+                    x_min, x_max = np.min(x_coords), np.max(x_coords)
+                    y_min, y_max = np.min(y_coords), np.max(y_coords)
+                    
+                    # Clamp to image bounds
+                    x_min = max(0, min(x_min, img_width))
+                    x_max = max(0, min(x_max, img_width))
+                    y_min = max(0, min(y_min, img_height))
+                    y_max = max(0, min(y_max, img_height))
+                    
+                    if x_max > x_min and y_max > y_min:
+                        bbox_2d = [x_min, y_min, x_max - x_min, y_max - y_min]
+                    else:
+                        bbox_2d = []
+                else:
+                    bbox_2d = []
+            else:
+                bbox_2d = []
+            
+            # Add annotation if valid bounding box
+            if bbox_2d and len(bbox_2d) == 4:
+                annotations.append({
+                    'class': class_name,
+                    'bbox': bbox_2d,
+                    'bbox_coords': [bbox_2d[0], bbox_2d[1], 
+                                  bbox_2d[0] + bbox_2d[2], bbox_2d[1] + bbox_2d[3]],
+                    'id': box_data.get('id', 0),
+                    'truncation': box_data.get('truncation', 0.0),
+                    'occlusion': box_data.get('occlusion', 0.0)
+                })
+        
+        return annotations
+    
+    def _skew_symmetric(self, v):
+        """Create skew symmetric matrix from vector"""
+        return np.array([[0, -v[2], v[1]], 
+                        [v[2], 0, -v[0]], 
+                        [-v[1], v[0], 0]])
+    
+    def get_unique_classes(self) -> List[str]:
+        """Get all unique class names from the dataset"""
+        classes = set()
+        
+        # Process each sequence
+        for sequence_dir in self.bbox_path.iterdir():
+            if not sequence_dir.is_dir() or sequence_dir.name.startswith('.'):
                 continue
             
-            # Check if detection files already exist
-            det_img_path = det_img_dir / img_file.name
-            det_label_path = det_label_dir / img_file.with_suffix('.txt').name
+            label3d_dir = sequence_dir / "label3D" / "cam_front_center"
+            if not label3d_dir.exists():
+                continue
             
-            if det_img_path.exists() and det_label_path.exists():
-                continue  # Skip existing
+            # Process each label file
+            for label_file in label3d_dir.glob("*.json"):
+                try:
+                    with open(label_file, 'r') as f:
+                        label_data = json.load(f)
+                    
+                    for box_key, box_data in label_data.items():
+                        if box_key.startswith('box_') and 'class' in box_data:
+                            classes.add(box_data['class'])
+                except:
+                    continue
+        
+        return sorted(list(classes))
+    
+    def convert_to_coco_format(self, output_file: str):
+        """Convert A2D2 to COCO format"""
+        coco_data = {
+            "images": [],
+            "annotations": [],
+            "categories": []
+        }
+        
+        # Get unique classes from the dataset
+        unique_classes = self.get_unique_classes()
+        print(f"Found classes: {unique_classes}")
+        
+        # Create categories
+        category_map = {}
+        for idx, class_name in enumerate(unique_classes):
+            category_id = idx + 1
+            coco_data["categories"].append({
+                "id": category_id,
+                "name": class_name,
+                "supercategory": "object"
+            })
+            category_map[class_name] = category_id
+        
+        image_id = 0
+        annotation_id = 0
+        
+        # Process each sequence
+        for sequence_dir in self.bbox_path.iterdir():
+            if not sequence_dir.is_dir() or sequence_dir.name.startswith('.'):
+                continue
             
-            try:
-                # Load image to get dimensions
-                img = cv2.imread(str(img_file))
-                if img is None:
+            print(f"Processing sequence: {sequence_dir.name}")
+            
+            camera_dir = sequence_dir / "camera" / "cam_front_center"
+            label3d_dir = sequence_dir / "label3D" / "cam_front_center"
+            
+            if not camera_dir.exists() or not label3d_dir.exists():
+                continue
+            
+            # Process each image in the sequence
+            for img_file in camera_dir.glob("*.png"):
+                image_id += 1
+                
+                # Get corresponding JSON files
+                base_name = img_file.stem
+                camera_json = camera_dir / f"{base_name}.json"
+                label3d_json = label3d_dir / f"{base_name}.json"
+                
+                if not label3d_json.exists():
                     continue
                 
-                h, w = img.shape[:2]
-                
-                # Read segmentation annotations
-                with open(label_file, 'r') as f:
-                    seg_annotations = f.readlines()
-                
-                # Convert segmentation polygons to bounding boxes
-                det_annotations = []
-                
-                for line in seg_annotations:
-                    parts = line.strip().split()
-                    if len(parts) < 7:  # Need at least class + 3 points
+                # Load image to get dimensions
+                try:
+                    img = cv2.imread(str(img_file))
+                    if img is None:
                         continue
-                    
-                    class_id = int(parts[0])
-                    
-                    # Only process detection classes (vehicles, people, bikes)
-                    if class_id not in detection_classes:
-                        continue
-                    
-                    # Extract polygon coordinates
-                    coords = [float(x) for x in parts[1:]]
-                    
-                    if len(coords) < 6:  # Need at least 3 points (6 coordinates)
-                        continue
-                    
-                    # Convert to x,y pairs
-                    points = []
-                    for i in range(0, len(coords), 2):
-                        if i + 1 < len(coords):
-                            points.append([coords[i], coords[i+1]])
-                    
-                    if len(points) < 3:
-                        continue
-                    
-                    # Get bounding box from polygon
-                    points = np.array(points)
-                    x_min = points[:, 0].min()
-                    y_min = points[:, 1].min()
-                    x_max = points[:, 0].max()
-                    y_max = points[:, 1].max()
-                    
-                    # Convert to YOLO format (center, width, height)
-                    x_center = (x_min + x_max) / 2
-                    y_center = (y_min + y_max) / 2
-                    width = x_max - x_min
-                    height = y_max - y_min
-                    
-                    # Filter out very small or invalid boxes
-                    if width > 0.01 and height > 0.01 and width < 1.0 and height < 1.0:
-                        bbox_line = f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
-                        det_annotations.append(bbox_line)
+                    height, width = img.shape[:2]
+                except:
+                    continue
                 
-                # Copy image
-                shutil.copy2(img_file, det_img_path)
+                # Add image info
+                coco_data["images"].append({
+                    "id": image_id,
+                    "file_name": f"{sequence_dir.name}_{img_file.name}",
+                    "width": width,
+                    "height": height,
+                    "sequence": sequence_dir.name
+                })
                 
-                # Save detection annotations
-                with open(det_label_path, 'w') as f:
-                    f.write('\n'.join(det_annotations))
+                # Process 3D labels
+                annotations = self.process_3d_labels(str(label3d_json), "front_center", width, height)
                 
-                split_converted += 1
-                
-            except Exception as e:
-                print(f"Error processing {img_file.name}: {e}")
+                for ann in annotations:
+                    if ann['class'] in category_map:
+                        annotation_id += 1
+                        x, y, w, h = ann['bbox']
+                        
+                        coco_data["annotations"].append({
+                            "id": annotation_id,
+                            "image_id": image_id,
+                            "category_id": category_map[ann['class']],
+                            "bbox": [x, y, w, h],
+                            "area": w * h,
+                            "iscrowd": 0,
+                            "truncation": ann.get('truncation', 0.0),
+                            "occlusion": ann.get('occlusion', 0.0)
+                        })
+        
+        # Save COCO format
+        with open(output_file, 'w') as f:
+            json.dump(coco_data, f, indent=2)
+        
+        print(f"\nCOCO format saved to {output_file}")
+        print(f"Total images: {len(coco_data['images'])}")
+        print(f"Total annotations: {len(coco_data['annotations'])}")
+        print(f"Categories: {[cat['name'] for cat in coco_data['categories']]}")
+    
+    def convert_to_yolo_format(self, output_dir: str):
+        """Convert A2D2 to YOLO format"""
+        output_path = Path(output_dir)
+        output_path.mkdir(exist_ok=True)
+        
+        # Get unique classes from the dataset
+        unique_classes = self.get_unique_classes()
+        print(f"Found classes: {unique_classes}")
+        
+        # Create class names file
+        with open(output_path / "classes.txt", 'w') as f:
+            for class_name in unique_classes:
+                f.write(f"{class_name}\n")
+        
+        # Create class mapping
+        class_to_id = {name: idx for idx, name in enumerate(unique_classes)}
+        
+        image_count = 0
+        annotation_count = 0
+        
+        # Process each sequence
+        for sequence_dir in self.bbox_path.iterdir():
+            if not sequence_dir.is_dir() or sequence_dir.name.startswith('.'):
                 continue
+            
+            print(f"Processing sequence: {sequence_dir.name}")
+            
+            camera_dir = sequence_dir / "camera" / "cam_front_center"
+            label3d_dir = sequence_dir / "label3D" / "cam_front_center"
+            
+            if not camera_dir.exists() or not label3d_dir.exists():
+                continue
+            
+            # Process each image in the sequence
+            for img_file in camera_dir.glob("*.png"):
+                base_name = img_file.stem
+                label3d_json = label3d_dir / f"{base_name}.json"
+                
+                if not label3d_json.exists():
+                    continue
+                
+                # Load image dimensions
+                try:
+                    img = cv2.imread(str(img_file))
+                    if img is None:
+                        continue
+                    img_height, img_width = img.shape[:2]
+                except:
+                    continue
+                
+                # Process 3D labels
+                annotations = self.process_3d_labels(str(label3d_json), "front_center", img_width, img_height)
+                
+                # Create YOLO annotation file
+                yolo_file = output_path / f"{sequence_dir.name}_{base_name}.txt"
+                
+                with open(yolo_file, 'w') as f:
+                    for ann in annotations:
+                        if ann['class'] in class_to_id:
+                            class_id = class_to_id[ann['class']]
+                            x_min, y_min, x_max, y_max = ann['bbox_coords']
+                            
+                            # Convert to YOLO format (normalized center coordinates)
+                            center_x = (x_min + x_max) / 2 / img_width
+                            center_y = (y_min + y_max) / 2 / img_height
+                            width = (x_max - x_min) / img_width
+                            height = (y_max - y_min) / img_height
+                            
+                            f.write(f"{class_id} {center_x:.6f} {center_y:.6f} {width:.6f} {height:.6f}\n")
+                            annotation_count += 1
+                
+                image_count += 1
         
-        print(f"  {split}: {split_converted} files converted")
-        total_converted += split_converted
-    
-    print(f"\nTotal converted: {total_converted} files")
-    
-    # Create detection config
-    create_detection_config()
+        print(f"\nYOLO format saved to {output_dir}")
+        print(f"Total images: {image_count}")
+        print(f"Total annotations: {annotation_count}")
+        print(f"Classes file: {output_path / 'classes.txt'}")
+        print(f"Categories: {unique_classes}")
 
-def create_detection_config():
-    """Create 2D detection config file"""
-    
-    config = {
-        'path': '/home/Lambdaone/Emma/a2d2_yolo/2d_detection',
-        'train': 'train/images',
-        'val': 'val/images',
-        'test': 'test/images',
-        'nc': 3,
-        'names': ['Car', 'Pedestrian', 'Bicycle']
-    }
-    
-    config_path = Path("/home/Lambdaone/Emma/a2d2_yolo/2d_detection_config.yaml")
-    
-    import yaml
-    with open(config_path, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False)
-    
-    print(f"Created detection config: {config_path}")
-
-def check_current_status():
-    """Check current dataset status"""
-    
-    base_path = Path("/home/Lambdaone/Emma/a2d2_yolo")
-    
-    print("Current A2D2 YOLO Dataset Status:")
-    print("=" * 40)
-    
-    for task in ['segmentation', '2d_detection', '3d_detection']:
-        print(f"\n{task.upper()}:")
-        
-        task_total = 0
-        for split in ['train', 'val', 'test']:
-            img_dir = base_path / task / split / "images"
-            if img_dir.exists():
-                count = len(list(img_dir.glob("*")))
-                print(f"  {split}: {count:,} images")
-                task_total += count
-            else:
-                print(f"  {split}: 0 images")
-        
-        print(f"  Total: {task_total:,} images")
-
+# Usage example
 if __name__ == "__main__":
-    print("A2D2 2D Detection Converter")
-    print("Converting from existing segmentation data...")
+    # Initialize converter with your A2D2 dataset path
+    converter = A2D2Converter("/path/to/your/a2d2/dataset")
     
-    # Check current status
-    check_current_status()
+    # Convert to COCO format
+    converter.convert_to_coco_format("a2d2_coco.json")
     
-    # Convert segmentation to detection
-    convert_segmentation_to_detection()
-    
-    # Show final status
-    print("\nFinal status:")
-    check_current_status()
-    
-    print("\nNext steps:")
-    print("1. Train 2D detection: python train_2d.py")
-    print("2. For 3D detection, need to check bbox data availability")
+    # Convert to YOLO format
+    converter.convert_to_yolo_format("a2d2_yolo")
