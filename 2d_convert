@@ -9,10 +9,19 @@ class A2D2Converter:
     def __init__(self, a2d2_root_path: str):
         self.root_path = Path(a2d2_root_path)
         self.bbox_path = self.root_path / "camera_lidar_semantic_bboxes"
+        self.semantic_path = self.root_path / "camera_lidar_semantic"
         
-        # Load class list from the semantic dataset
-        semantic_class_file = self.root_path / "camera_lidar_semantic" / "class_list.json"
+        # Verify paths exist
+        if not self.bbox_path.exists():
+            raise FileNotFoundError(f"3D bboxes path not found: {self.bbox_path}")
+        
+        print(f"Root path: {self.root_path}")
+        print(f"3D bboxes path: {self.bbox_path}")
+        print(f"Semantic path: {self.semantic_path}")
+        
+        # Load class list from the bbox dataset (prioritize this one)
         bbox_class_file = self.bbox_path / "class_list.json"
+        semantic_class_file = self.semantic_path / "class_list.json"
         
         # Use whichever class file exists
         if bbox_class_file.exists():
@@ -33,14 +42,18 @@ class A2D2Converter:
                 "Bus": "Bus"
             }
         
-        # Load camera configuration
+        # Load camera configuration from root
         config_file = self.root_path / "cams_lidars.json"
         if config_file.exists():
             with open(config_file, 'r') as f:
                 self.config = json.load(f)
+            print(f"Loaded camera config from: {config_file}")
         else:
             self.config = None
             print("Warning: cams_lidars.json not found. Will use image dimensions from files.")
+        
+        # Print dataset summary
+        self._print_dataset_summary()
     
     def project_3d_to_2d(self, points_3d: np.ndarray, camera_name: str) -> Tuple[np.ndarray, np.ndarray]:
         """Project 3D points to 2D using camera intrinsics"""
@@ -235,6 +248,41 @@ class A2D2Converter:
         
         return sorted(list(classes))
     
+    def _print_dataset_summary(self):
+        """Print summary of the dataset structure"""
+        print("\n" + "="*50)
+        print("A2D2 DATASET SUMMARY")
+        print("="*50)
+        
+        # Count sequences and files
+        bbox_sequences = [d for d in self.bbox_path.iterdir() if d.is_dir() and not d.name.startswith('.')]
+        
+        total_images = 0
+        total_3d_labels = 0
+        
+        for seq_dir in bbox_sequences:
+            camera_dir = seq_dir / "camera" / "cam_front_center"
+            label3d_dir = seq_dir / "label3D" / "cam_front_center"
+            
+            if camera_dir.exists():
+                images = list(camera_dir.glob("*.png"))
+                total_images += len(images)
+            
+            if label3d_dir.exists():
+                labels = list(label3d_dir.glob("*.json"))
+                total_3d_labels += len(labels)
+        
+        print(f"Sequences found: {len(bbox_sequences)}")
+        print(f"Total images: {total_images}")
+        print(f"Total 3D label files: {total_3d_labels}")
+        print(f"Sequences: {[seq.name for seq in bbox_sequences]}")
+        
+        # Show unique classes
+        unique_classes = self.get_unique_classes()
+        print(f"Unique classes found: {len(unique_classes)}")
+        print(f"Classes: {unique_classes}")
+        print("="*50 + "\n")
+    
     def convert_to_coco_format(self, output_file: str, resume: bool = True):
         """Convert A2D2 to COCO format with resume capability"""
         # Check if output file exists and resume is enabled
@@ -361,6 +409,9 @@ class A2D2Converter:
         print(f"Total images: {len(coco_data['images'])}")
         print(f"Total annotations: {len(coco_data['annotations'])}")
         print(f"Categories: {[cat['name'] for cat in coco_data['categories']]}")
+        
+        # Generate dataset info for training frameworks
+        self._generate_coco_dataset_info(output_file, coco_data)
     
     def convert_to_yolo_format(self, output_dir: str, resume: bool = True):
         """Convert A2D2 to YOLO format with resume capability"""
@@ -459,14 +510,190 @@ class A2D2Converter:
         print(f"Total annotations: {annotation_count}")
         print(f"Classes file: {output_path / 'classes.txt'}")
         print(f"Categories: {unique_classes}")
+    
+    def _generate_coco_dataset_info(self, output_file: str, coco_data: dict):
+        """Generate additional files for COCO-based training frameworks"""
+        output_path = Path(output_file).parent
+        
+        # Create dataset info file for frameworks like YOLOX, RT-DETR
+        dataset_info = {
+            "info": {
+                "description": "A2D2 Dataset converted to COCO format",
+                "version": "1.0",
+                "year": 2024,
+                "contributor": "A2D2 Converter",
+                "date_created": "2024"
+            },
+            "licenses": [{
+                "url": "https://creativecommons.org/licenses/by-nd/4.0/",
+                "id": 1,
+                "name": "CC BY ND 4.0"
+            }],
+            "dataset_stats": {
+                "total_images": len(coco_data['images']),
+                "total_annotations": len(coco_data['annotations']),
+                "num_categories": len(coco_data['categories']),
+                "categories": [cat['name'] for cat in coco_data['categories']]
+            }
+        }
+        
+        with open(output_path / "dataset_info.json", 'w') as f:
+            json.dump(dataset_info, f, indent=2)
+        
+        # Create category mapping file (useful for some frameworks)
+        category_mapping = {cat['name']: cat['id'] for cat in coco_data['categories']}
+        with open(output_path / "category_mapping.json", 'w') as f:
+            json.dump(category_mapping, f, indent=2)
+        
+        print(f"Generated additional COCO files:")
+        print(f"  - {output_path / 'dataset_info.json'}")
+        print(f"  - {output_path / 'category_mapping.json'}")
+    
+    def _generate_yolo_dataset_config(self, output_path: Path, classes: list, image_count: int, annotation_count: int):
+        """Generate YOLO dataset configuration files"""
+        
+        # Generate data.yaml for YOLOv5/YOLOv8/YOLOv11/YOLOv12
+        yolo_config = {
+            'path': str(output_path.absolute()),
+            'train': 'images/train',  # You'll need to organize images
+            'val': 'images/val',
+            'test': 'images/test',
+            'nc': len(classes),
+            'names': classes
+        }
+        
+        with open(output_path / "data.yaml", 'w') as f:
+            # Write YAML format
+            f.write(f"# A2D2 Dataset Configuration\n")
+            f.write(f"# Generated from A2D2 converter\n\n")
+            f.write(f"path: {yolo_config['path']}\n")
+            f.write(f"train: {yolo_config['train']}\n")
+            f.write(f"val: {yolo_config['val']}\n")
+            f.write(f"test: {yolo_config['test']}\n\n")
+            f.write(f"# number of classes\n")
+            f.write(f"nc: {yolo_config['nc']}\n\n")
+            f.write(f"# class names\n")
+            f.write(f"names:\n")
+            for i, name in enumerate(classes):
+                f.write(f"  {i}: {name}\n")
+        
+        # Generate dataset statistics
+        stats = {
+            "dataset_name": "A2D2",
+            "total_images": image_count,
+            "total_annotations": annotation_count,
+            "num_classes": len(classes),
+            "classes": classes,
+            "format": "YOLO",
+            "annotation_format": "class_id center_x center_y width height (normalized)",
+            "coordinate_system": "normalized [0,1]"
+        }
+        
+        with open(output_path / "dataset_stats.json", 'w') as f:
+            json.dump(stats, f, indent=2)
+        
+        # Generate training recommendations
+        recommendations = {
+            "recommended_settings": {
+                "YOLOv12": {
+                    "model": "yolo12n/s/m/l/x.pt",
+                    "imgsz": 640,
+                    "batch": 16,
+                    "epochs": 100,
+                    "data": "data.yaml"
+                },
+                "YOLOv11": {
+                    "model": "yolo11n/s/m/l/x.pt", 
+                    "imgsz": 640,
+                    "batch": 16,
+                    "epochs": 100,
+                    "data": "data.yaml"
+                },
+                "YOLOv8": {
+                    "model": "yolov8n/s/m/l/x.pt",
+                    "imgsz": 640,
+                    "batch": 16,
+                    "epochs": 100,
+                    "data": "data.yaml"
+                }
+            },
+            "notes": [
+                "Adjust batch size based on your GPU memory",
+                "Consider using larger image sizes (1280) for better accuracy",
+                "Use data augmentation for better generalization",
+                "Split data into train/val/test sets before training"
+            ]
+        }
+        
+        with open(output_path / "training_recommendations.json", 'w') as f:
+            json.dump(recommendations, f, indent=2)
+        
+        print(f"Generated YOLO configuration files:")
+        print(f"  - {output_path / 'data.yaml'}")
+        print(f"  - {output_path / 'dataset_stats.json'}")
+        print(f"  - {output_path / 'training_recommendations.json'}")
+    
+    def create_train_val_test_split(self, output_dir: str, train_ratio: float = 0.7, val_ratio: float = 0.2, test_ratio: float = 0.1):
+        """Create train/validation/test splits for YOLO training"""
+        import random
+        from shutil import copy2
+        
+        output_path = Path(output_dir)
+        if not output_path.exists():
+            print("Run conversion first to generate YOLO format")
+            return
+        
+        # Create directory structure
+        for split in ['train', 'val', 'test']:
+            (output_path / 'images' / split).mkdir(parents=True, exist_ok=True)
+            (output_path / 'labels' / split).mkdir(parents=True, exist_ok=True)
+        
+        # Get all annotation files
+        txt_files = list(output_path.glob("*.txt"))
+        txt_files = [f for f in txt_files if f.name not in ['classes.txt', 'dataset_stats.json']]
+        
+        # Shuffle and split
+        random.shuffle(txt_files)
+        n_total = len(txt_files)
+        n_train = int(n_total * train_ratio)
+        n_val = int(n_total * val_ratio)
+        
+        train_files = txt_files[:n_train]
+        val_files = txt_files[n_train:n_train + n_val]
+        test_files = txt_files[n_train + n_val:]
+        
+        splits = {
+            'train': train_files,
+            'val': val_files, 
+            'test': test_files
+        }
+        
+        for split_name, files in splits.items():
+            print(f"Moving {len(files)} files to {split_name} split...")
+            for txt_file in files:
+                # Move annotation file
+                copy2(txt_file, output_path / 'labels' / split_name / txt_file.name)
+                
+                # Find and move corresponding image (you'll need to adjust image path)
+                # This assumes images are in the same directory or you have a way to find them
+                print(f"Note: You'll need to manually move corresponding images for {txt_file.name}")
+        
+        print(f"Split complete: {len(train_files)} train, {len(val_files)} val, {len(test_files)} test")
+        
+        # Generate YOLO dataset configuration files
+        self._generate_yolo_dataset_config(output_path, unique_classes, image_count, annotation_count)
 
 # Usage example
 if __name__ == "__main__":
     # Initialize converter with your A2D2 dataset path
-    converter = A2D2Converter("/path/to/your/a2d2/dataset")
+    # Use the CURRENT directory where your dataset is located
+    converter = A2D2Converter(".")  # Since your structure shows C:. as root
     
     # Convert to COCO format (with resume capability)
     converter.convert_to_coco_format("a2d2_coco.json", resume=True)
     
-    # Convert to YOLO format (with resume capability)
+    # Convert to YOLO format (with resume capability)  
     converter.convert_to_yolo_format("a2d2_yolo", resume=True)
+    
+    # Optional: Create train/val/test splits for YOLO training
+    # converter.create_train_val_test_split("a2d2_yolo", train_ratio=0.7, val_ratio=0.2, test_ratio=0.1)
