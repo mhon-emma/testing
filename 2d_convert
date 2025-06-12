@@ -339,7 +339,13 @@ class A2D2Converter:
             label3d_dir = sequence_dir / "label3D" / "cam_front_center"
             
             if not camera_dir.exists() or not label3d_dir.exists():
+                print(f"Skipping {sequence_dir.name}: missing camera or label3D directory")
                 continue
+            
+            # Debug: show what files we find
+            png_files = list(camera_dir.glob("*.png"))
+            json_files = list(label3d_dir.glob("*.json"))
+            print(f"  Found {len(png_files)} PNG files, {len(json_files)} label3D files")
             
             # Process each image in the sequence
             for img_file in camera_dir.glob("*.png"):
@@ -350,12 +356,17 @@ class A2D2Converter:
                     
                 image_id += 1
                 
-                # Get corresponding JSON files
-                base_name = img_file.stem
+                # Get corresponding JSON files - FIX THE FILENAME MAPPING
+                base_name = img_file.stem  # e.g., "20180807145028_camera_frontcenter_000028313"
+                
+                # Convert camera filename to label3D filename
+                # "20180807145028_camera_frontcenter_000028313" -> "20180807145028_label3D_frontcenter_000028313"
+                label3d_name = base_name.replace("_camera_", "_label3D_")
                 camera_json = camera_dir / f"{base_name}.json"
-                label3d_json = label3d_dir / f"{base_name}.json"
+                label3d_json = label3d_dir / f"{label3d_name}.json"
                 
                 if not label3d_json.exists():
+                    print(f"Warning: Label3D file not found: {label3d_json}")
                     continue
                 
                 # Load image to get dimensions
@@ -453,7 +464,13 @@ class A2D2Converter:
             label3d_dir = sequence_dir / "label3D" / "cam_front_center"
             
             if not camera_dir.exists() or not label3d_dir.exists():
+                print(f"Skipping {sequence_dir.name}: missing camera or label3D directory")
                 continue
+            
+            # Debug: show what files we find
+            png_files = list(camera_dir.glob("*.png"))
+            json_files = list(label3d_dir.glob("*.json"))
+            print(f"  Found {len(png_files)} PNG files, {len(json_files)} label3D files")
             
             # Process each image in the sequence
             for img_file in camera_dir.glob("*.png"):
@@ -463,8 +480,15 @@ class A2D2Converter:
                 # Skip if already processed
                 if file_key in processed_files:
                     continue
-                    
-                label3d_json = label3d_dir / f"{base_name}.json"
+                
+                # Convert camera filename to label3D filename - FIX THE FILENAME MAPPING
+                # "20180807145028_camera_frontcenter_000028313" -> "20180807145028_label3D_frontcenter_000028313"
+                label3d_name = base_name.replace("_camera_", "_label3D_")
+                label3d_json = label3d_dir / f"{label3d_name}.json"
+                
+                if not label3d_json.exists():
+                    print(f"Warning: Label3D file not found: {label3d_json}")
+                    continue
                 
                 if not label3d_json.exists():
                     continue
