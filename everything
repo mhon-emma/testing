@@ -58,10 +58,11 @@ class CompleteA2D2Organizer:
                                          train_ratio: float = 0.7, 
                                          val_ratio: float = 0.2, 
                                          test_ratio: float = 0.1,
-                                         image_format: str = "jpg"):
+                                         image_format: str = "jpg",
+                                         skip_existing: bool = True):
         """Create complete training folder structure with images and annotations"""
         
-        print("\n🚀 Creating Complete Training Structure...")
+        print("\nCreating Complete Training Structure...")
         print("=" * 60)
         
         # Step 1: Collect all data
@@ -69,10 +70,25 @@ class CompleteA2D2Organizer:
         all_data = self._collect_all_data()
         
         if not all_data:
-            print("❌ No data found!")
+            print("ERROR: No data found!")
             return
         
-        print(f"✅ Found {len(all_data)} image-annotation pairs")
+        print(f"Found {len(all_data)} image-annotation pairs")
+        
+        # Check if output directory exists and has data
+        if skip_existing and self.output_dir.exists():
+            yolo_train_dir = self.output_dir / "yolo" / "images" / "train"
+            if yolo_train_dir.exists() and len(list(yolo_train_dir.glob("*"))) > 0:
+                print(f"WARNING: Output directory {self.output_dir} already has data.")
+                print("   Use skip_existing=False to regenerate everything")
+                print("   Or delete the directory first")
+                
+                # Just generate configs if data exists
+                print("Generating training configurations only...")
+                stats = self._quick_stats_from_existing()
+                self._generate_training_configs(stats)
+                print("Training configs updated!")
+                return stats
         
         # Step 2: Split data
         print("Step 2: Splitting data into train/val/test...")
@@ -84,13 +100,14 @@ class CompleteA2D2Organizer:
         
         # Step 4: Process and copy files
         print("Step 4: Processing and copying files...")
+        print("   (This may take a while for large datasets - progress shown below)")
         stats = self._process_and_copy_files(splits, image_format)
         
         # Step 5: Generate training configs
         print("Step 5: Generating training configurations...")
         self._generate_training_configs(stats)
         
-        print("\n🎉 Complete! Your training-ready dataset is in:", self.output_dir)
+        print("\nComplete! Your training-ready dataset is in:", self.output_dir)
         self._print_final_summary(stats)
         
         return stats
@@ -184,7 +201,7 @@ class CompleteA2D2Organizer:
         for folder in folders:
             (self.output_dir / folder).mkdir(parents=True, exist_ok=True)
         
-        print(f"✅ Created folder structure in {self.output_dir}")
+        print(f"Created folder structure in {self.output_dir}")
     
     def _process_and_copy_files(self, splits, image_format):
         """Process and copy all files to appropriate directories"""
@@ -198,7 +215,7 @@ class CompleteA2D2Organizer:
         
         # Process each split
         for split_name, data_list in splits.items():
-            print(f"   Processing {split_name} split...")
+            print(f"   Processing {split_name} split ({len(data_list)} files)...")
             
             split_stats = {
                 'images': 0,
@@ -220,10 +237,19 @@ class CompleteA2D2Organizer:
             image_id = 0
             annotation_id = 0
             
-            # Process each file in this split
+            # Process each file in this split with progress
+            total_files = len(data_list)
+            processed_count = 0
+            
             for item in data_list:
+                processed_count += 1
                 image_id += 1
                 split_stats['images'] += 1
+                
+                # Show progress every 100 files or at key milestones
+                if processed_count % 100 == 0 or processed_count in [1, 10, 50] or processed_count == total_files:
+                    progress_pct = (processed_count / total_files) * 100
+                    print(f"     {split_name}: {processed_count}/{total_files} ({progress_pct:.1f}%) - {item['sequence']}")
                 
                 # Generate new filename
                 new_name = f"{item['sequence']}_{item['base_name']}"
@@ -234,23 +260,38 @@ class CompleteA2D2Organizer:
                 img_dst_coco = self.output_dir / "coco" / "images" / split_name / f"{new_name}.{image_format}"
                 img_dst_orig = self.output_dir / "original_images" / f"{new_name}.png"
                 
-                # Load and process image
-                img = cv2.imread(str(img_src))
-                if img is None:
+                # Skip if files already exist (resume capability)
+                if img_dst_yolo.exists() and img_dst_coco.exists():
+                    # Still need to process annotations for stats
+                    annotations = self._process_3d_labels(item['label_path'], "front_center", 1920, 1208)  # Default A2D2 size
+                    split_stats['annotations'] += len([ann for ann in annotations if ann['class'] in category_map])
+                    split_stats['files'].append(new_name)
                     continue
                 
-                height, width = img.shape[:2]
-                
-                # Save images
-                if image_format.lower() == 'jpg':
-                    cv2.imwrite(str(img_dst_yolo), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                    cv2.imwrite(str(img_dst_coco), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                else:
-                    cv2.imwrite(str(img_dst_yolo), img)
-                    cv2.imwrite(str(img_dst_coco), img)
-                
-                # Copy original
-                shutil.copy2(img_src, img_dst_orig)
+                # Load and process image
+                try:
+                    img = cv2.imread(str(img_src))
+                    if img is None:
+                        print(f"     Warning: Could not load image {img_src}")
+                        continue
+                    
+                    height, width = img.shape[:2]
+                    
+                    # Save images
+                    if image_format.lower() == 'jpg':
+                        cv2.imwrite(str(img_dst_yolo), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        cv2.imwrite(str(img_dst_coco), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    else:
+                        cv2.imwrite(str(img_dst_yolo), img)
+                        cv2.imwrite(str(img_dst_coco), img)
+                    
+                    # Copy original
+                    if not img_dst_orig.exists():
+                        shutil.copy2(img_src, img_dst_orig)
+                    
+                except Exception as e:
+                    print(f"     Error processing {img_src}: {e}")
+                    continue
                 
                 # Add to COCO data
                 coco_data["images"].append({
@@ -295,9 +336,11 @@ class CompleteA2D2Organizer:
                 # Save YOLO annotation
                 yolo_label_file = self.output_dir / "yolo" / "labels" / split_name / f"{new_name}.txt"
                 with open(yolo_label_file, 'w') as f:
-                    f.write('\\n'.join(yolo_annotations))
+                    f.write('\n'.join(yolo_annotations))
                 
                 split_stats['files'].append(new_name)
+            
+            print(f"     {split_name} complete: {split_stats['images']} images, {split_stats['annotations']} annotations")
             
             # Save COCO annotations for this split
             coco_file = self.output_dir / "coco" / "annotations" / f"{split_name}.json"
@@ -525,20 +568,20 @@ class Exp(MyExp):
     
     def _print_final_summary(self, stats):
         """Print final summary of the organized dataset"""
-        print("\\n" + "=" * 60)
-        print("📊 TRAINING-READY DATASET SUMMARY")
+        print("\n" + "=" * 60)
+        print("TRAINING-READY DATASET SUMMARY")
         print("=" * 60)
-        print(f"📁 Output directory: {self.output_dir}")
-        print(f"📊 Total images: {stats['total_images']}")
-        print(f"🏷️  Total annotations: {stats['total_annotations']}")
-        print(f"📂 Classes ({len(stats['classes'])}): {', '.join(stats['classes'])}")
+        print(f"Output directory: {self.output_dir}")
+        print(f"Total images: {stats['total_images']}")
+        print(f"Total annotations: {stats['total_annotations']}")
+        print(f"Classes ({len(stats['classes'])}): {', '.join(stats['classes'])}")
         print()
         
         for split_name, split_data in stats['splits'].items():
             print(f"   {split_name.upper()}: {split_data['images']} images, {split_data['annotations']} annotations")
         
         print()
-        print("📁 Generated folders:")
+        print("Generated folders:")
         print("   ├── yolo/                    # YOLO format (YOLOv11/v12)")
         print("   ├── coco/                    # COCO format (YOLOX, RT-DETR)")
         print("   ├── original_images/         # Original PNG files")
@@ -546,7 +589,7 @@ class Exp(MyExp):
         print("   ├── scripts/                 # Ready-to-use training scripts")
         print("   └── dataset_info.json        # Dataset metadata")
         print()
-        print("🚀 Ready to train:")
+        print("Ready to train:")
         print(f"   YOLOv11/v12: cd {self.output_dir} && python scripts/train_yolo.py")
         print(f"   YOLOX: Use configs/yolox_a2d2.py")
         print("=" * 60)
