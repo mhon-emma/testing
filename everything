@@ -1,0 +1,573 @@
+#!/usr/bin/env python3
+"""
+Complete A2D2 Dataset Organizer
+Converts A2D2 to COCO/YOLO format and creates complete training folder structure
+"""
+
+import json
+import os
+import numpy as np
+from pathlib import Path
+import cv2
+import random
+import shutil
+from typing import Dict, List, Tuple
+import argparse
+
+class CompleteA2D2Organizer:
+    def __init__(self, a2d2_root_path: str, output_dir: str = "a2d2_training_ready"):
+        self.root_path = Path(a2d2_root_path)
+        self.bbox_path = self.root_path / "camera_lidar_semantic_bboxes"
+        self.semantic_path = self.root_path / "camera_lidar_semantic"
+        self.output_dir = Path(output_dir)
+        
+        # Verify paths exist
+        if not self.bbox_path.exists():
+            raise FileNotFoundError(f"3D bboxes path not found: {self.bbox_path}")
+        
+        print(f"Root path: {self.root_path}")
+        print(f"Output directory: {self.output_dir}")
+        
+        # Load config and classes
+        self._load_config_and_classes()
+        
+    def _load_config_and_classes(self):
+        """Load camera config and class definitions"""
+        # Load camera configuration
+        config_file = self.root_path / "cams_lidars.json"
+        if config_file.exists():
+            with open(config_file, 'r') as f:
+                self.config = json.load(f)
+        else:
+            self.config = None
+            print("Warning: cams_lidars.json not found")
+        
+        # Load class list
+        bbox_class_file = self.bbox_path / "class_list.json"
+        if bbox_class_file.exists():
+            with open(bbox_class_file, 'r') as f:
+                self.class_list = json.load(f)
+        else:
+            # Default classes
+            self.class_list = {
+                "Car": "Car", "VanSUV": "VanSUV", "Truck": "Truck",
+                "Pedestrian": "Pedestrian", "Bicycle": "Bicycle"
+            }
+    
+    def create_complete_training_structure(self, 
+                                         train_ratio: float = 0.7, 
+                                         val_ratio: float = 0.2, 
+                                         test_ratio: float = 0.1,
+                                         image_format: str = "jpg"):
+        """Create complete training folder structure with images and annotations"""
+        
+        print("\n🚀 Creating Complete Training Structure...")
+        print("=" * 60)
+        
+        # Step 1: Collect all data
+        print("Step 1: Collecting all images and annotations...")
+        all_data = self._collect_all_data()
+        
+        if not all_data:
+            print("❌ No data found!")
+            return
+        
+        print(f"✅ Found {len(all_data)} image-annotation pairs")
+        
+        # Step 2: Split data
+        print("Step 2: Splitting data into train/val/test...")
+        splits = self._split_data(all_data, train_ratio, val_ratio, test_ratio)
+        
+        # Step 3: Create folder structure
+        print("Step 3: Creating folder structure...")
+        self._create_folder_structure()
+        
+        # Step 4: Process and copy files
+        print("Step 4: Processing and copying files...")
+        stats = self._process_and_copy_files(splits, image_format)
+        
+        # Step 5: Generate training configs
+        print("Step 5: Generating training configurations...")
+        self._generate_training_configs(stats)
+        
+        print("\n🎉 Complete! Your training-ready dataset is in:", self.output_dir)
+        self._print_final_summary(stats)
+        
+        return stats
+    
+    def _collect_all_data(self):
+        """Collect all image-annotation pairs from the dataset"""
+        all_data = []
+        
+        # Get unique classes
+        unique_classes = self._get_unique_classes()
+        
+        # Process each sequence
+        for sequence_dir in self.bbox_path.iterdir():
+            if not sequence_dir.is_dir() or sequence_dir.name.startswith('.'):
+                continue
+            
+            camera_dir = sequence_dir / "camera" / "cam_front_center"
+            label3d_dir = sequence_dir / "label3D" / "cam_front_center"
+            
+            if not camera_dir.exists() or not label3d_dir.exists():
+                continue
+            
+            # Process each image
+            for img_file in camera_dir.glob("*.png"):
+                base_name = img_file.stem
+                
+                # Convert filename pattern
+                label3d_name = base_name.replace("_camera_", "_label3D_")
+                label3d_file = label3d_dir / f"{label3d_name}.json"
+                
+                if label3d_file.exists():
+                    all_data.append({
+                        'image_path': img_file,
+                        'label_path': label3d_file,
+                        'sequence': sequence_dir.name,
+                        'base_name': base_name
+                    })
+        
+        return all_data
+    
+    def _split_data(self, all_data, train_ratio, val_ratio, test_ratio):
+        """Split data into train/validation/test sets"""
+        # Shuffle data
+        random.shuffle(all_data)
+        
+        n_total = len(all_data)
+        n_train = int(n_total * train_ratio)
+        n_val = int(n_total * val_ratio)
+        
+        splits = {
+            'train': all_data[:n_train],
+            'val': all_data[n_train:n_train + n_val],
+            'test': all_data[n_train + n_val:]
+        }
+        
+        print(f"   Train: {len(splits['train'])} images")
+        print(f"   Val: {len(splits['val'])} images")
+        print(f"   Test: {len(splits['test'])} images")
+        
+        return splits
+    
+    def _create_folder_structure(self):
+        """Create the complete folder structure"""
+        
+        # Create main directories
+        folders = [
+            # YOLO format
+            "yolo/images/train",
+            "yolo/images/val", 
+            "yolo/images/test",
+            "yolo/labels/train",
+            "yolo/labels/val",
+            "yolo/labels/test",
+            
+            # COCO format
+            "coco/images/train",
+            "coco/images/val",
+            "coco/images/test",
+            "coco/annotations",
+            
+            # Original images backup
+            "original_images",
+            
+            # Training configs
+            "configs",
+            
+            # Training scripts
+            "scripts"
+        ]
+        
+        for folder in folders:
+            (self.output_dir / folder).mkdir(parents=True, exist_ok=True)
+        
+        print(f"✅ Created folder structure in {self.output_dir}")
+    
+    def _process_and_copy_files(self, splits, image_format):
+        """Process and copy all files to appropriate directories"""
+        
+        stats = {
+            'total_images': 0,
+            'total_annotations': 0,
+            'classes': self._get_unique_classes(),
+            'splits': {}
+        }
+        
+        # Process each split
+        for split_name, data_list in splits.items():
+            print(f"   Processing {split_name} split...")
+            
+            split_stats = {
+                'images': 0,
+                'annotations': 0,
+                'files': []
+            }
+            
+            # Create COCO annotation structure for this split
+            coco_data = {
+                "images": [],
+                "annotations": [],
+                "categories": [
+                    {"id": idx + 1, "name": class_name, "supercategory": "object"}
+                    for idx, class_name in enumerate(stats['classes'])
+                ]
+            }
+            
+            category_map = {name: idx + 1 for idx, name in enumerate(stats['classes'])}
+            image_id = 0
+            annotation_id = 0
+            
+            # Process each file in this split
+            for item in data_list:
+                image_id += 1
+                split_stats['images'] += 1
+                
+                # Generate new filename
+                new_name = f"{item['sequence']}_{item['base_name']}"
+                
+                # Copy and convert image
+                img_src = item['image_path']
+                img_dst_yolo = self.output_dir / "yolo" / "images" / split_name / f"{new_name}.{image_format}"
+                img_dst_coco = self.output_dir / "coco" / "images" / split_name / f"{new_name}.{image_format}"
+                img_dst_orig = self.output_dir / "original_images" / f"{new_name}.png"
+                
+                # Load and process image
+                img = cv2.imread(str(img_src))
+                if img is None:
+                    continue
+                
+                height, width = img.shape[:2]
+                
+                # Save images
+                if image_format.lower() == 'jpg':
+                    cv2.imwrite(str(img_dst_yolo), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    cv2.imwrite(str(img_dst_coco), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                else:
+                    cv2.imwrite(str(img_dst_yolo), img)
+                    cv2.imwrite(str(img_dst_coco), img)
+                
+                # Copy original
+                shutil.copy2(img_src, img_dst_orig)
+                
+                # Add to COCO data
+                coco_data["images"].append({
+                    "id": image_id,
+                    "file_name": f"{new_name}.{image_format}",
+                    "width": width,
+                    "height": height,
+                    "sequence": item['sequence']
+                })
+                
+                # Process annotations
+                annotations = self._process_3d_labels(item['label_path'], "front_center", width, height)
+                yolo_annotations = []
+                
+                for ann in annotations:
+                    if ann['class'] in category_map:
+                        annotation_id += 1
+                        split_stats['annotations'] += 1
+                        
+                        # COCO format
+                        x, y, w, h = ann['bbox']
+                        coco_data["annotations"].append({
+                            "id": annotation_id,
+                            "image_id": image_id,
+                            "category_id": category_map[ann['class']],
+                            "bbox": [x, y, w, h],
+                            "area": w * h,
+                            "iscrowd": 0
+                        })
+                        
+                        # YOLO format
+                        class_id = category_map[ann['class']] - 1  # YOLO uses 0-based indexing
+                        x_min, y_min, x_max, y_max = ann['bbox_coords']
+                        
+                        center_x = (x_min + x_max) / 2 / width
+                        center_y = (y_min + y_max) / 2 / height
+                        bbox_width = (x_max - x_min) / width
+                        bbox_height = (y_max - y_min) / height
+                        
+                        yolo_annotations.append(f"{class_id} {center_x:.6f} {center_y:.6f} {bbox_width:.6f} {bbox_height:.6f}")
+                
+                # Save YOLO annotation
+                yolo_label_file = self.output_dir / "yolo" / "labels" / split_name / f"{new_name}.txt"
+                with open(yolo_label_file, 'w') as f:
+                    f.write('\\n'.join(yolo_annotations))
+                
+                split_stats['files'].append(new_name)
+            
+            # Save COCO annotations for this split
+            coco_file = self.output_dir / "coco" / "annotations" / f"{split_name}.json"
+            with open(coco_file, 'w') as f:
+                json.dump(coco_data, f, indent=2)
+            
+            stats['splits'][split_name] = split_stats
+            stats['total_images'] += split_stats['images']
+            stats['total_annotations'] += split_stats['annotations']
+        
+        return stats
+    
+    def _generate_training_configs(self, stats):
+        """Generate all training configuration files"""
+        
+        # YOLO data.yaml
+        yolo_config = {
+            'path': str(self.output_dir / "yolo"),
+            'train': 'images/train',
+            'val': 'images/val',
+            'test': 'images/test',
+            'nc': len(stats['classes']),
+            'names': stats['classes']
+        }
+        
+        with open(self.output_dir / "yolo" / "data.yaml", 'w') as f:
+            f.write(f"# A2D2 Dataset - YOLO Format\\n")
+            f.write(f"# Auto-generated training configuration\\n\\n")
+            f.write(f"path: {yolo_config['path']}\\n")
+            f.write(f"train: {yolo_config['train']}\\n")
+            f.write(f"val: {yolo_config['val']}\\n")
+            f.write(f"test: {yolo_config['test']}\\n\\n")
+            f.write(f"nc: {yolo_config['nc']}\\n\\n")
+            f.write(f"names:\\n")
+            for i, name in enumerate(stats['classes']):
+                f.write(f"  {i}: {name}\\n")
+        
+        # Classes file
+        with open(self.output_dir / "yolo" / "classes.txt", 'w') as f:
+            for class_name in stats['classes']:
+                f.write(f"{class_name}\\n")
+        
+        # Training scripts
+        self._generate_training_scripts(stats)
+        
+        # Dataset info
+        dataset_info = {
+            "dataset_name": "A2D2_Complete",
+            "total_images": stats['total_images'],
+            "total_annotations": stats['total_annotations'],
+            "num_classes": len(stats['classes']),
+            "classes": stats['classes'],
+            "splits": {k: {"images": v['images'], "annotations": v['annotations']} 
+                     for k, v in stats['splits'].items()},
+            "formats": ["YOLO", "COCO"],
+            "image_format": "jpg"
+        }
+        
+        with open(self.output_dir / "dataset_info.json", 'w') as f:
+            json.dump(dataset_info, f, indent=2)
+    
+    def _generate_training_scripts(self, stats):
+        """Generate ready-to-use training scripts"""
+        
+        # YOLOv11/v12 training script
+        yolo_script = f'''#!/usr/bin/env python3
+"""
+YOLOv11/v12 Training Script for A2D2 Dataset
+Auto-generated training script
+"""
+
+from ultralytics import YOLO
+import os
+
+def train_yolo():
+    # Model options: yolo11n.pt, yolo11s.pt, yolo11m.pt, yolo11l.pt, yolo11x.pt
+    model = YOLO('yolo11n.pt')  # Start with nano model
+    
+    # Training parameters
+    results = model.train(
+        data='yolo/data.yaml',
+        epochs=100,
+        imgsz=640,
+        batch=16,  # Adjust based on GPU memory
+        device=0,  # Use GPU 0, or 'cpu' for CPU training
+        project='a2d2_training',
+        name='yolo11n_experiment1',
+        save=True,
+        save_period=10,
+        val=True,
+        plots=True,
+        verbose=True
+    )
+    
+    print("Training completed!")
+    print(f"Best weights saved to: {{results.save_dir}}/weights/best.pt")
+    
+    # Test the model
+    metrics = model.val()
+    print(f"Validation mAP50: {{metrics.box.map50:.3f}}")
+    print(f"Validation mAP50-95: {{metrics.box.map:.3f}}")
+
+if __name__ == "__main__":
+    train_yolo()
+'''
+        
+        with open(self.output_dir / "scripts" / "train_yolo.py", 'w') as f:
+            f.write(yolo_script)
+        
+        # YOLOX config file
+        yolox_config = f'''#!/usr/bin/env python3
+"""
+YOLOX Configuration for A2D2 Dataset
+Auto-generated configuration
+"""
+
+import os
+from yolox.exp import Exp as MyExp
+
+class Exp(MyExp):
+    def __init__(self):
+        super(Exp, self).__init__()
+        self.depth = 0.33
+        self.width = 0.50
+        self.exp_name = "a2d2_yolox"
+
+        # Dataset paths
+        self.data_dir = "coco"
+        self.train_ann = "annotations/train.json"
+        self.val_ann = "annotations/val.json"
+        
+        # Dataset parameters
+        self.num_classes = {len(stats['classes'])}
+        self.max_epoch = 100
+        self.data_num_workers = 4
+        self.eval_interval = 10
+        
+        # Training parameters
+        self.basic_lr_per_img = 0.01 / 64.0
+        self.warmup_epochs = 5
+        
+        # Input size
+        self.input_size = (640, 640)
+        self.test_size = (640, 640)
+        
+        # Augmentation
+        self.mosaic_prob = 1.0
+        self.mixup_prob = 1.0
+        self.hsv_prob = 1.0
+        self.flip_prob = 0.5
+'''
+        
+        with open(self.output_dir / "configs" / "yolox_a2d2.py", 'w') as f:
+            f.write(yolox_config)
+        
+        # Make scripts executable
+        os.chmod(self.output_dir / "scripts" / "train_yolo.py", 0o755)
+    
+    def _get_unique_classes(self):
+        """Get all unique class names from the dataset"""
+        classes = set()
+        
+        for sequence_dir in self.bbox_path.iterdir():
+            if not sequence_dir.is_dir():
+                continue
+            
+            label3d_dir = sequence_dir / "label3D" / "cam_front_center"
+            if not label3d_dir.exists():
+                continue
+            
+            for label_file in label3d_dir.glob("*.json"):
+                try:
+                    with open(label_file, 'r') as f:
+                        label_data = json.load(f)
+                    
+                    for box_key, box_data in label_data.items():
+                        if box_key.startswith('box_') and 'class' in box_data:
+                            classes.add(box_data['class'])
+                except:
+                    continue
+        
+        return sorted(list(classes))
+    
+    def _process_3d_labels(self, label3d_file: str, camera_name: str, img_width: int, img_height: int) -> List[Dict]:
+        """Process 3D bounding box labels"""
+        try:
+            with open(label3d_file, 'r') as f:
+                label3d_data = json.load(f)
+        except:
+            return []
+        
+        annotations = []
+        
+        for box_key, box_data in label3d_data.items():
+            if not box_key.startswith('box_'):
+                continue
+            
+            class_name = box_data.get('class', 'Unknown')
+            
+            # Use provided 2d_bbox if available
+            if '2d_bbox' in box_data and len(box_data['2d_bbox']) == 4:
+                x_min, y_min, x_max, y_max = box_data['2d_bbox']
+                
+                # Clamp to image bounds
+                x_min = max(0, min(x_min, img_width))
+                x_max = max(0, min(x_max, img_width))
+                y_min = max(0, min(y_min, img_height))
+                y_max = max(0, min(y_max, img_height))
+                
+                if x_max > x_min and y_max > y_min:
+                    bbox_2d = [x_min, y_min, x_max - x_min, y_max - y_min]
+                    
+                    annotations.append({
+                        'class': class_name,
+                        'bbox': bbox_2d,
+                        'bbox_coords': [x_min, y_min, x_max, y_max],
+                        'id': box_data.get('id', 0),
+                        'truncation': box_data.get('truncation', 0.0),
+                        'occlusion': box_data.get('occlusion', 0.0)
+                    })
+        
+        return annotations
+    
+    def _print_final_summary(self, stats):
+        """Print final summary of the organized dataset"""
+        print("\\n" + "=" * 60)
+        print("📊 TRAINING-READY DATASET SUMMARY")
+        print("=" * 60)
+        print(f"📁 Output directory: {self.output_dir}")
+        print(f"📊 Total images: {stats['total_images']}")
+        print(f"🏷️  Total annotations: {stats['total_annotations']}")
+        print(f"📂 Classes ({len(stats['classes'])}): {', '.join(stats['classes'])}")
+        print()
+        
+        for split_name, split_data in stats['splits'].items():
+            print(f"   {split_name.upper()}: {split_data['images']} images, {split_data['annotations']} annotations")
+        
+        print()
+        print("📁 Generated folders:")
+        print("   ├── yolo/                    # YOLO format (YOLOv11/v12)")
+        print("   ├── coco/                    # COCO format (YOLOX, RT-DETR)")
+        print("   ├── original_images/         # Original PNG files")
+        print("   ├── configs/                 # Training configurations")
+        print("   ├── scripts/                 # Ready-to-use training scripts")
+        print("   └── dataset_info.json        # Dataset metadata")
+        print()
+        print("🚀 Ready to train:")
+        print(f"   YOLOv11/v12: cd {self.output_dir} && python scripts/train_yolo.py")
+        print(f"   YOLOX: Use configs/yolox_a2d2.py")
+        print("=" * 60)
+
+def main():
+    parser = argparse.ArgumentParser(description='Complete A2D2 Dataset Organizer')
+    parser.add_argument('--input', '-i', default='.', help='A2D2 dataset root directory')
+    parser.add_argument('--output', '-o', default='a2d2_training_ready', help='Output directory')
+    parser.add_argument('--train-ratio', type=float, default=0.7, help='Training set ratio')
+    parser.add_argument('--val-ratio', type=float, default=0.2, help='Validation set ratio') 
+    parser.add_argument('--test-ratio', type=float, default=0.1, help='Test set ratio')
+    parser.add_argument('--image-format', choices=['jpg', 'png'], default='jpg', help='Output image format')
+    
+    args = parser.parse_args()
+    
+    # Create organizer and run
+    organizer = CompleteA2D2Organizer(args.input, args.output)
+    organizer.create_complete_training_structure(
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio, 
+        test_ratio=args.test_ratio,
+        image_format=args.image_format
+    )
+
+if __name__ == "__main__":
+    main()
