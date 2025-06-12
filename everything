@@ -324,16 +324,18 @@ class CompleteA2D2Organizer:
         }
         
         with open(self.output_dir / "yolo" / "data.yaml", 'w') as f:
-            f.write(f"# A2D2 Dataset - YOLO Format\\n")
-            f.write(f"# Auto-generated training configuration\\n\\n")
-            f.write(f"path: {yolo_config['path']}\\n")
-            f.write(f"train: {yolo_config['train']}\\n")
-            f.write(f"val: {yolo_config['val']}\\n")
-            f.write(f"test: {yolo_config['test']}\\n\\n")
-            f.write(f"nc: {yolo_config['nc']}\\n\\n")
-            f.write(f"names:\\n")
+            f.write(f"# A2D2 Dataset - YOLO Format\n")
+            f.write(f"# Auto-generated training configuration\n\n")
+            f.write(f"path: {yolo_config['path']}\n")
+            f.write(f"train: {yolo_config['train']}\n")
+            f.write(f"val: {yolo_config['val']}\n")
+            f.write(f"test: {yolo_config['test']}\n\n")
+            f.write(f"# Number of classes\n")
+            f.write(f"nc: {yolo_config['nc']}\n\n")
+            f.write(f"# Class names\n")
+            f.write(f"names:\n")
             for i, name in enumerate(stats['classes']):
-                f.write(f"  {i}: {name}\\n")
+                f.write(f"  {i}: {name}\n")
         
         # Classes file
         with open(self.output_dir / "yolo" / "classes.txt", 'w') as f:
