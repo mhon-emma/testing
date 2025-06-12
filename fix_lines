@@ -1,0 +1,116 @@
+import os
+import glob
+from pathlib import Path
+
+def fix_yolo_labels(input_folder, output_folder):
+    """
+    Fix YOLO annotation files by converting literal \\n to actual newlines
+    
+    Args:
+        input_folder (str): Path to folder containing the .txt files to fix
+        output_folder (str): Path to folder where corrected files will be saved
+    """
+    
+    # Create output folder if it doesn't exist
+    Path(output_folder).mkdir(parents=True, exist_ok=True)
+    
+    # Find all .txt files in the input folder
+    txt_files = glob.glob(os.path.join(input_folder, "*.txt"))
+    
+    if not txt_files:
+        print(f"No .txt files found in {input_folder}")
+        return
+    
+    print(f"Found {len(txt_files)} .txt files to process")
+    
+    processed_count = 0
+    error_count = 0
+    
+    for file_path in txt_files:
+        try:
+            # Get the filename without the full path
+            filename = os.path.basename(file_path)
+            output_path = os.path.join(output_folder, filename)
+            
+            # Read the original file
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Replace literal \\n with actual newlines
+            fixed_content = content.replace('\\n', '\n')
+            
+            # Remove any trailing whitespace and ensure file ends with newline
+            fixed_content = fixed_content.strip()
+            if fixed_content:  # Only add newline if file has content
+                fixed_content += '\n'
+            
+            # Write the corrected content to the output folder
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(fixed_content)
+            
+            processed_count += 1
+            print(f"✓ Fixed: {filename}")
+            
+        except Exception as e:
+            error_count += 1
+            print(f"✗ Error processing {filename}: {str(e)}")
+    
+    print(f"\nProcessing complete!")
+    print(f"Successfully processed: {processed_count} files")
+    if error_count > 0:
+        print(f"Errors encountered: {error_count} files")
+
+def preview_file_content(file_path, max_lines=5):
+    """
+    Preview the content of a file to check the format
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        print(f"\nPreview of {os.path.basename(file_path)}:")
+        print("-" * 40)
+        for i, line in enumerate(lines[:max_lines]):
+            print(f"Line {i+1}: {repr(line)}")
+        
+        if len(lines) > max_lines:
+            print(f"... and {len(lines) - max_lines} more lines")
+            
+    except Exception as e:
+        print(f"Error reading {file_path}: {str(e)}")
+
+# Main execution
+if __name__ == "__main__":
+    # Set your paths here
+    input_folder = "yolo/labels/train"  # Adjust this path as needed
+    output_folder = "yolo/labels/train_fixed"  # Output folder name
+    
+    print("YOLO Label Fixer Script")
+    print("=" * 30)
+    
+    # Check if input folder exists
+    if not os.path.exists(input_folder):
+        print(f"Error: Input folder '{input_folder}' does not exist!")
+        print("Please update the 'input_folder' variable with the correct path.")
+        exit(1)
+    
+    # Show a preview of the first file before processing
+    txt_files = glob.glob(os.path.join(input_folder, "*.txt"))
+    if txt_files:
+        print(f"Before processing - preview of first file:")
+        preview_file_content(txt_files[0])
+    
+    # Ask for confirmation
+    response = input(f"\nProcess {len(txt_files)} files from '{input_folder}' to '{output_folder}'? (y/n): ")
+    
+    if response.lower() in ['y', 'yes']:
+        fix_yolo_labels(input_folder, output_folder)
+        
+        # Show preview of the fixed file
+        if txt_files:
+            fixed_file = os.path.join(output_folder, os.path.basename(txt_files[0]))
+            if os.path.exists(fixed_file):
+                print(f"\nAfter processing - preview of first fixed file:")
+                preview_file_content(fixed_file)
+    else:
+        print("Operation cancelled.")
