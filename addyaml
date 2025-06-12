@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""
+Quick fix for data.yaml file
+Run this in your a2d2_training_ready directory
+"""
+
+import json
+from pathlib import Path
+import os
+
+def fix_data_yaml():
+    """Generate a proper data.yaml file"""
+    
+    # Get current directory
+    current_dir = Path(".")
+    yolo_dir = current_dir / "yolo"
+    
+    # Check if we're in the right directory
+    if not yolo_dir.exists():
+        print("❌ Error: yolo/ directory not found!")
+        print("Make sure you're running this from the a2d2_training_ready directory")
+        return
+    
+    # Read dataset info to get classes
+    dataset_info_file = current_dir / "dataset_info.json"
+    if dataset_info_file.exists():
+        with open(dataset_info_file, 'r') as f:
+            dataset_info = json.load(f)
+        classes = dataset_info['classes']
+        num_classes = len(classes)
+    else:
+        # Fallback: read from classes.txt
+        classes_file = yolo_dir / "classes.txt"
+        if classes_file.exists():
+            with open(classes_file, 'r') as f:
+                classes = [line.strip() for line in f.readlines() if line.strip()]
+            num_classes = len(classes)
+        else:
+            print("❌ Error: Cannot find class information!")
+            return
+    
+    # Create proper data.yaml content
+    yaml_content = f"""# A2D2 Dataset Configuration for YOLO
+# Auto-generated configuration file
+
+# Dataset root path (absolute path)
+path: {yolo_dir.absolute()}
+
+# Relative paths from 'path'
+train: images/train
+val: images/val
+test: images/test
+
+# Number of classes
+nc: {num_classes}
+
+# Class names
+names:
+"""
+    
+    # Add class names
+    for i, class_name in enumerate(classes):
+        yaml_content += f"  {i}: {class_name}\n"
+    
+    # Write the file
+    yaml_file = yolo_dir / "data.yaml"
+    with open(yaml_file, 'w') as f:
+        f.write(yaml_content)
+    
+    print("✅ Fixed data.yaml file!")
+    print(f"📄 Generated: {yaml_file}")
+    print(f"📊 Classes: {num_classes}")
+    print(f"📝 Class names: {', '.join(classes)}")
+    
+    # Verify the file
+    print("\n📋 data.yaml content:")
+    print("-" * 40)
+    with open(yaml_file, 'r') as f:
+        print(f.read())
+    print("-" * 40)
+    
+    # Check if images exist
+    train_imgs = yolo_dir / "images" / "train"
+    val_imgs = yolo_dir / "images" / "val"
+    test_imgs = yolo_dir / "images" / "test"
+    
+    train_count = len(list(train_imgs.glob("*"))) if train_imgs.exists() else 0
+    val_count = len(list(val_imgs.glob("*"))) if val_imgs.exists() else 0
+    test_count = len(list(test_imgs.glob("*"))) if test_imgs.exists() else 0
+    
+    print(f"\n📊 Dataset split:")
+    print(f"   Train: {train_count} images")
+    print(f"   Val: {val_count} images") 
+    print(f"   Test: {test_count} images")
+    
+    if train_count == 0 or val_count == 0:
+        print("\n⚠️  Warning: No images found in train/val directories!")
+        print("Make sure you've run the complete organizer script first.")
+    else:
+        print("\n🚀 Ready to train! Run:")
+        print(f"   yolo train model=yolo11n.pt data={yaml_file} epochs=100 batch=16")
+
+def create_simple_train_script():
+    """Create a simple training script"""
+    
+    train_script = '''#!/usr/bin/env python3
+"""
+Simple YOLO Training Script
+"""
+
+from ultralytics import YOLO
+import os
+
+def train_yolo():
+    print("🚀 Starting YOLO training...")
+    
+    # Load model
+    model = YOLO('yolo11n.pt')  # Downloads automatically if not present
+    
+    # Train
+    results = model.train(
+        data='yolo/data.yaml',
+        epochs=100,
+        imgsz=640,
+        batch=16,
+        device=0,  # Use GPU 0
+        project='yolo_training',
+        name='a2d2_experiment',
+        save=True,
+        val=True,
+        plots=True,
+        verbose=True
+    )
+    
+    print("✅ Training completed!")
+    print(f"📁 Results saved to: {results.save_dir}")
+    
+    # Validate
+    metrics = model.val()
+    print(f"📊 mAP50: {metrics.box.map50:.3f}")
+    print(f"📊 mAP50-95: {metrics.box.map:.3f}")
+
+if __name__ == "__main__":
+    train_yolo()
+'''
+    
+    with open("train_yolo_simple.py", 'w') as f:
+        f.write(train_script)
+    
+    os.chmod("train_yolo_simple.py", 0o755)
+    print("✅ Created train_yolo_simple.py")
+
+if __name__ == "__main__":
+    print("🔧 Fixing YOLO data.yaml file...")
+    fix_data_yaml()
+    create_simple_train_script()
+    print("\n🎯 Next steps:")
+    print("1. pip install -U ultralytics")
+    print("2. python train_yolo_simple.py")
