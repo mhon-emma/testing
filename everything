@@ -54,6 +54,73 @@ class CompleteA2D2Organizer:
                 "Pedestrian": "Pedestrian", "Bicycle": "Bicycle"
             }
     
+    def _get_unique_classes(self):
+        """Get all unique class names from the dataset"""
+        classes = set()
+        
+        # Process each sequence
+        for sequence_dir in self.bbox_path.iterdir():
+            if not sequence_dir.is_dir() or sequence_dir.name.startswith('.'):
+                continue
+            
+            label3d_dir = sequence_dir / "label3D" / "cam_front_center"
+            if not label3d_dir.exists():
+                continue
+            
+            # Process each label file
+            for label_file in label3d_dir.glob("*.json"):
+                try:
+                    with open(label_file, 'r') as f:
+                        label_data = json.load(f)
+                    
+                    for box_key, box_data in label_data.items():
+                        if box_key.startswith('box_') and 'class' in box_data:
+                            classes.add(box_data['class'])
+                except:
+                    continue
+        
+        return sorted(list(classes))
+    
+    def _process_3d_labels(self, label3d_file: str, camera_name: str, img_width: int, img_height: int) -> List[Dict]:
+        """Process 3D bounding box labels"""
+        try:
+            with open(label3d_file, 'r') as f:
+                label3d_data = json.load(f)
+        except:
+            return []
+        
+        annotations = []
+        
+        for box_key, box_data in label3d_data.items():
+            if not box_key.startswith('box_'):
+                continue
+            
+            class_name = box_data.get('class', 'Unknown')
+            
+            # Use provided 2d_bbox if available
+            if '2d_bbox' in box_data and len(box_data['2d_bbox']) == 4:
+                x_min, y_min, x_max, y_max = box_data['2d_bbox']
+                
+                # Clamp to image bounds
+                x_min = max(0, min(x_min, img_width))
+                x_max = max(0, min(x_max, img_width))
+                y_min = max(0, min(y_min, img_height))
+                y_max = max(0, min(y_max, img_height))
+                
+                if x_max > x_min and y_max > y_min:
+                    bbox_2d = [x_min, y_min, x_max - x_min, y_max - y_min]
+                    
+                    annotations.append({
+                        'class': class_name,
+                        'bbox': bbox_2d,
+                        'bbox_coords': [x_min, y_min, x_max, y_max],
+                        'id': box_data.get('id', 0),
+                        'truncation': box_data.get('truncation', 0.0),
+                        'occlusion': box_data.get('occlusion', 0.0)
+                    })
+        
+        return annotations
+    
     def create_complete_training_structure(self, 
                                          train_ratio: float = 0.7, 
                                          val_ratio: float = 0.2, 
@@ -89,6 +156,50 @@ class CompleteA2D2Organizer:
                 self._generate_training_configs(stats)
                 print("Training configs updated!")
                 return stats
+    
+    def _quick_stats_from_existing(self):
+        """Generate stats from existing organized dataset"""
+        stats = {
+            'total_images': 0,
+            'total_annotations': 0,
+            'classes': self._get_unique_classes(),
+            'splits': {}
+        }
+        
+        splits = ['train', 'val', 'test']
+        for split in splits:
+            yolo_img_dir = self.output_dir / "yolo" / "images" / split
+            yolo_label_dir = self.output_dir / "yolo" / "labels" / split
+            
+            if yolo_img_dir.exists():
+                images = list(yolo_img_dir.glob("*"))
+                labels = list(yolo_label_dir.glob("*.txt")) if yolo_label_dir.exists() else []
+                
+                # Count annotations
+                total_annotations = 0
+                for label_file in labels:
+                    try:
+                        with open(label_file, 'r') as f:
+                            total_annotations += len([line for line in f if line.strip()])
+                    except:
+                        pass
+                
+                stats['splits'][split] = {
+                    'images': len(images),
+                    'annotations': total_annotations,
+                    'files': [img.stem for img in images]
+                }
+                stats['total_images'] += len(images)
+                stats['total_annotations'] += total_annotations
+            else:
+                # Create empty stats if directory doesn't exist
+                stats['splits'][split] = {
+                    'images': 0,
+                    'annotations': 0,
+                    'files': []
+                }
+        
+        return stats
         
         # Step 2: Split data
         print("Step 2: Splitting data into train/val/test...")
