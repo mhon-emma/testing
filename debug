@@ -1,0 +1,634 @@
+#!/usr/bin/env python3
+"""
+Debug and Fix A2D2 Dataset Issues
+Comprehensive script to identify and fix all dataset problems
+"""
+
+import json
+import os
+import shutil
+from pathlib import Path
+import cv2
+import numpy as np
+from collections import defaultdict
+import random
+
+class A2D2DatasetDebugger:
+    def __init__(self, dataset_path: str):
+        self.dataset_path = Path(dataset_path)
+        self.issues = defaultdict(list)
+        self.stats = {}
+    
+    def full_diagnostic(self):
+        """Run complete diagnostic of the dataset"""
+        print("Running Full Dataset Diagnostic...")
+        print("=" * 60)
+        
+        # Check basic structure
+        self._check_directory_structure()
+        
+        # Check YOLO format
+        if (self.dataset_path / "yolo").exists():
+            self._check_yolo_format()
+        
+        # Check COCO format
+        if (self.dataset_path / "coco").exists():
+            self._check_coco_format()
+        
+        # Print diagnostic results
+        self._print_diagnostic_results()
+        
+        return self.issues
+    
+    def _check_directory_structure(self):
+        """Check if all required directories exist"""
+        print("Checking directory structure...")
+        
+        required_dirs = [
+            "yolo/images/train",
+            "yolo/images/val", 
+            "yolo/images/test",
+            "yolo/labels/train",
+            "yolo/labels/val",
+            "yolo/labels/test"
+        ]
+        
+        for dir_path in required_dirs:
+            full_path = self.dataset_path / dir_path
+            if not full_path.exists():
+                self.issues['missing_directories'].append(str(dir_path))
+            else:
+                # Count files
+                if 'images' in dir_path:
+                    count = len(list(full_path.glob("*.jpg"))) + len(list(full_path.glob("*.png")))
+                    self.stats[f"{dir_path}_images"] = count
+                elif 'labels' in dir_path:
+                    count = len(list(full_path.glob("*.txt")))
+                    self.stats[f"{dir_path}_labels"] = count
+    
+    def _check_yolo_format(self):
+        """Check YOLO format issues"""
+        print("Checking YOLO format...")
+        
+        yolo_path = self.dataset_path / "yolo"
+        
+        # Check data.yaml
+        data_yaml = yolo_path / "data.yaml"
+        if not data_yaml.exists():
+            self.issues['missing_files'].append("yolo/data.yaml")
+        else:
+            self._validate_data_yaml(data_yaml)
+        
+        # Check image-label matching
+        for split in ['train', 'val', 'test']:
+            self._check_image_label_matching(split)
+            self._validate_label_format(split)
+    
+    def _validate_data_yaml(self, yaml_file):
+        """Validate data.yaml format"""
+        try:
+            with open(yaml_file, 'r') as f:
+                content = f.read()
+            
+            required_keys = ['path', 'train', 'val', 'nc', 'names']
+            for key in required_keys:
+                if f"{key}:" not in content:
+                    self.issues['yaml_missing_keys'].append(key)
+                    
+        except Exception as e:
+            self.issues['yaml_errors'].append(str(e))
+    
+    def _check_image_label_matching(self, split):
+        """Check if images and labels match"""
+        img_dir = self.dataset_path / "yolo" / "images" / split
+        label_dir = self.dataset_path / "yolo" / "labels" / split
+        
+        if not img_dir.exists() or not label_dir.exists():
+            return
+        
+        # Get all image and label files
+        img_files = set()
+        for ext in ['*.jpg', '*.jpeg', '*.png']:
+            img_files.update([f.stem for f in img_dir.glob(ext)])
+        
+        label_files = set([f.stem for f in label_dir.glob("*.txt")])
+        
+        # Find mismatches
+        missing_labels = img_files - label_files
+        missing_images = label_files - img_files
+        
+        if missing_labels:
+            self.issues[f'{split}_missing_labels'] = list(missing_labels)[:10]  # Show first 10
+        if missing_images:
+            self.issues[f'{split}_missing_images'] = list(missing_images)[:10]
+        
+        self.stats[f'{split}_matched_pairs'] = len(img_files.intersection(label_files))
+        self.stats[f'{split}_total_images'] = len(img_files)
+        self.stats[f'{split}_total_labels'] = len(label_files)
+    
+    def _validate_label_format(self, split):
+        """Validate YOLO label format"""
+        label_dir = self.dataset_path / "yolo" / "labels" / split
+        
+        if not label_dir.exists():
+            return
+        
+        empty_files = 0
+        invalid_files = 0
+        total_annotations = 0
+        
+        label_files = list(label_dir.glob("*.txt"))
+        sample_size = min(100, len(label_files))  # Check up to 100 files
+        
+        for label_file in random.sample(label_files, sample_size):
+            try:
+                with open(label_file, 'r') as f:
+                    lines = f.readlines()
+                
+                if not lines:
+                    empty_files += 1
+                    continue
+                
+                for line_num, line in enumerate(lines):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    parts = line.split()
+                    if len(parts) != 5:
+                        self.issues[f'{split}_invalid_format'].append(f"{label_file.name}:{line_num}")
+                        invalid_files += 1
+                        break
+                    
+                    # Check if values are valid
+                    try:
+                        class_id = int(parts[0])
+                        x, y, w, h = map(float, parts[1:5])
+                        
+                        # Check if coordinates are normalized (0-1)
+                        if not (0 <= x <= 1 and 0 <= y <= 1 and 0 <= w <= 1 and 0 <= h <= 1):
+                            self.issues[f'{split}_invalid_coords'].append(f"{label_file.name}:{line_num}")
+                            break
+                        
+                        total_annotations += 1
+                        
+                    except ValueError:
+                        self.issues[f'{split}_invalid_values'].append(f"{label_file.name}:{line_num}")
+                        invalid_files += 1
+                        break
+                        
+            except Exception as e:
+                self.issues[f'{split}_read_errors'].append(f"{label_file.name}: {str(e)}")
+        
+        self.stats[f'{split}_empty_labels'] = empty_files
+        self.stats[f'{split}_invalid_labels'] = invalid_files
+        self.stats[f'{split}_total_annotations'] = total_annotations
+        self.stats[f'{split}_avg_annotations_per_file'] = total_annotations / max(1, sample_size - empty_files)
+    
+    def _check_coco_format(self):
+        """Check COCO format issues"""
+        print("📋 Checking COCO format...")
+        
+        coco_path = self.dataset_path / "coco"
+        
+        for split in ['train', 'val', 'test']:
+            annotation_file = coco_path / "annotations" / f"{split}.json"
+            if annotation_file.exists():
+                self._validate_coco_annotation(annotation_file, split)
+    
+    def _validate_coco_annotation(self, annotation_file, split):
+        """Validate COCO annotation format"""
+        try:
+            with open(annotation_file, 'r') as f:
+                coco_data = json.load(f)
+            
+            # Check required fields
+            required_fields = ['images', 'annotations', 'categories']
+            for field in required_fields:
+                if field not in coco_data:
+                    self.issues[f'coco_{split}_missing_fields'].append(field)
+            
+            # Stats
+            self.stats[f'coco_{split}_images'] = len(coco_data.get('images', []))
+            self.stats[f'coco_{split}_annotations'] = len(coco_data.get('annotations', []))
+            self.stats[f'coco_{split}_categories'] = len(coco_data.get('categories', []))
+            
+        except Exception as e:
+            self.issues[f'coco_{split}_errors'].append(str(e))
+    
+    def _print_diagnostic_results(self):
+        """Print comprehensive diagnostic results"""
+        print("\n" + "=" * 60)
+        print("DIAGNOSTIC RESULTS")
+        print("=" * 60)
+        
+        # Print stats
+        print("DATASET STATISTICS:")
+        for key, value in self.stats.items():
+            print(f"   {key}: {value}")
+        
+        print("\nISSUES FOUND:")
+        if not self.issues:
+            print("No issues found!")
+        else:
+            for issue_type, details in self.issues.items():
+                print(f"   {issue_type}: {len(details)} issues")
+                if details and len(details) <= 5:
+                    for detail in details[:5]:
+                        print(f"      - {detail}")
+                elif details:
+                    print(f"      - {details[0]} (and {len(details)-1} more...)")
+        
+        print("=" * 60)
+    
+    def fix_all_issues(self, original_a2d2_path: str):
+        """Fix all identified issues by regenerating the dataset"""
+        print("\n🛠️ FIXING ALL ISSUES...")
+        print("=" * 60)
+        
+        if self.issues:
+            print("Issues found. Regenerating dataset from scratch...")
+            return self._regenerate_clean_dataset(original_a2d2_path)
+        else:
+            print("No issues found. Dataset is ready for training!")
+            return True
+    
+    def _regenerate_clean_dataset(self, original_a2d2_path: str):
+        """Regenerate a clean dataset from original A2D2 data"""
+        print("Regenerating clean dataset...")
+        
+        # Create backup of current dataset
+        backup_path = self.dataset_path.parent / f"{self.dataset_path.name}_backup"
+        if self.dataset_path.exists():
+            if backup_path.exists():
+                shutil.rmtree(backup_path)
+            shutil.move(str(self.dataset_path), str(backup_path))
+            print(f"Backed up old dataset to: {backup_path}")
+        
+        # Import and use the complete organizer
+        return self._run_complete_organizer(original_a2d2_path)
+    
+    def _run_complete_organizer(self, original_a2d2_path: str):
+        """Run the complete organizer with better error handling"""
+        
+        try:
+            # Simplified but robust dataset creation
+            return self._create_robust_dataset(original_a2d2_path)
+        except Exception as e:
+            print(f"Error creating dataset: {e}")
+            return False
+    
+    def _create_robust_dataset(self, original_a2d2_path: str):
+        """Create a robust dataset with extensive validation"""
+        print("Creating robust dataset...")
+        
+        original_path = Path(original_a2d2_path)
+        bbox_path = original_path / "camera_lidar_semantic_bboxes"
+        
+        if not bbox_path.exists():
+            print(f"Original A2D2 path not found: {bbox_path}")
+            return False
+        
+        # Create directory structure
+        self.dataset_path.mkdir(parents=True, exist_ok=True)
+        
+        splits = ['train', 'val', 'test']
+        for split in splits:
+            (self.dataset_path / "yolo" / "images" / split).mkdir(parents=True, exist_ok=True)
+            (self.dataset_path / "yolo" / "labels" / split).mkdir(parents=True, exist_ok=True)
+            (self.dataset_path / "coco" / "images" / split).mkdir(parents=True, exist_ok=True)
+        
+        (self.dataset_path / "coco" / "annotations").mkdir(parents=True, exist_ok=True)
+        
+        # Collect and process data
+        all_data = self._collect_valid_data(bbox_path)
+        
+        if not all_data:
+            print("No valid data found!")
+            return False
+        
+        print(f"Found {len(all_data)} valid image-annotation pairs")
+        
+        # Split data
+        random.shuffle(all_data)
+        n_train = int(len(all_data) * 0.7)
+        n_val = int(len(all_data) * 0.2)
+        
+        data_splits = {
+            'train': all_data[:n_train],
+            'val': all_data[n_train:n_train + n_val],
+            'test': all_data[n_train + n_val:]
+        }
+        
+        # Get classes
+        classes = self._get_classes_from_data(all_data)
+        print(f"Found {len(classes)} classes: {classes}")
+        
+        # Process each split
+        total_processed = 0
+        for split_name, split_data in data_splits.items():
+            processed = self._process_split_robust(split_name, split_data, classes)
+            total_processed += processed
+            print(f"   {split_name}: {processed} files processed")
+        
+        # Create configuration files
+        self._create_config_files(classes, data_splits)
+        
+        print(f"Successfully created dataset with {total_processed} images!")
+        return True
+    
+    def _collect_valid_data(self, bbox_path):
+        """Collect only valid data pairs"""
+        valid_data = []
+        
+        for sequence_dir in bbox_path.iterdir():
+            if not sequence_dir.is_dir():
+                continue
+            
+            camera_dir = sequence_dir / "camera" / "cam_front_center"
+            label3d_dir = sequence_dir / "label3D" / "cam_front_center"
+            
+            if not camera_dir.exists() or not label3d_dir.exists():
+                continue
+            
+            for img_file in camera_dir.glob("*.png"):
+                # Create proper label filename
+                base_name = img_file.stem
+                label3d_name = base_name.replace("_camera_", "_label3D_")
+                label3d_file = label3d_dir / f"{label3d_name}.json"
+                
+                # Validate both files exist and are readable
+                if label3d_file.exists():
+                    try:
+                        # Test if image is readable
+                        img = cv2.imread(str(img_file))
+                        if img is None:
+                            continue
+                        
+                        # Test if label is readable and has content
+                        with open(label3d_file, 'r') as f:
+                            label_data = json.load(f)
+                        
+                        # Check if label has bounding boxes
+                        has_boxes = any(key.startswith('box_') for key in label_data.keys())
+                        if not has_boxes:
+                            continue
+                        
+                        valid_data.append({
+                            'image_path': img_file,
+                            'label_path': label3d_file,
+                            'sequence': sequence_dir.name,
+                            'base_name': base_name
+                        })
+                        
+                    except Exception as e:
+                        print(f"⚠️ Skipping {img_file.name}: {e}")
+                        continue
+        
+        return valid_data
+    
+    def _get_classes_from_data(self, all_data):
+        """Extract unique classes from all annotation data"""
+        classes = set()
+        
+        for data_item in all_data:
+            try:
+                with open(data_item['label_path'], 'r') as f:
+                    label_data = json.load(f)
+                
+                for box_key, box_data in label_data.items():
+                    if box_key.startswith('box_') and 'class' in box_data:
+                        classes.add(box_data['class'])
+            except:
+                continue
+        
+        return sorted(list(classes))
+    
+    def _process_split_robust(self, split_name, split_data, classes):
+        """Process a data split with robust error handling"""
+        category_map = {name: idx for idx, name in enumerate(classes)}
+        processed_count = 0
+        
+        # COCO data structure
+        coco_data = {
+            "images": [],
+            "annotations": [],
+            "categories": [
+                {"id": idx + 1, "name": name, "supercategory": "object"}
+                for idx, name in enumerate(classes)
+            ]
+        }
+        
+        image_id = 0
+        annotation_id = 0
+        
+        for data_item in split_data:
+            try:
+                image_id += 1
+                
+                # Load and process image
+                img = cv2.imread(str(data_item['image_path']))
+                if img is None:
+                    continue
+                
+                height, width = img.shape[:2]
+                
+                # Create new filename
+                new_name = f"{data_item['sequence']}_{data_item['base_name']}"
+                
+                # Save image (convert to JPG for smaller size)
+                img_dst = self.dataset_path / "yolo" / "images" / split_name / f"{new_name}.jpg"
+                coco_img_dst = self.dataset_path / "coco" / "images" / split_name / f"{new_name}.jpg"
+                
+                cv2.imwrite(str(img_dst), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                cv2.imwrite(str(coco_img_dst), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                
+                # Process annotations
+                with open(data_item['label_path'], 'r') as f:
+                    label_data = json.load(f)
+                
+                yolo_annotations = []
+                
+                # Add to COCO data
+                coco_data["images"].append({
+                    "id": image_id,
+                    "file_name": f"{new_name}.jpg",
+                    "width": width,
+                    "height": height
+                })
+                
+                for box_key, box_data in label_data.items():
+                    if not box_key.startswith('box_'):
+                        continue
+                    
+                    class_name = box_data.get('class', 'Unknown')
+                    if class_name not in category_map:
+                        continue
+                    
+                    # Use provided 2d_bbox if available
+                    if '2d_bbox' in box_data and len(box_data['2d_bbox']) == 4:
+                        x_min, y_min, x_max, y_max = box_data['2d_bbox']
+                        
+                        # Validate and clamp coordinates
+                        x_min = max(0, min(x_min, width))
+                        x_max = max(0, min(x_max, width))
+                        y_min = max(0, min(y_min, height))
+                        y_max = max(0, min(y_max, height))
+                        
+                        if x_max <= x_min or y_max <= y_min:
+                            continue
+                        
+                        bbox_width = x_max - x_min
+                        bbox_height = y_max - y_min
+                        
+                        # COCO annotation
+                        annotation_id += 1
+                        coco_data["annotations"].append({
+                            "id": annotation_id,
+                            "image_id": image_id,
+                            "category_id": category_map[class_name] + 1,  # COCO uses 1-based
+                            "bbox": [x_min, y_min, bbox_width, bbox_height],
+                            "area": bbox_width * bbox_height,
+                            "iscrowd": 0
+                        })
+                        
+                        # YOLO annotation (normalized)
+                        center_x = (x_min + x_max) / 2 / width
+                        center_y = (y_min + y_max) / 2 / height
+                        norm_width = bbox_width / width
+                        norm_height = bbox_height / height
+                        
+                        # Validate normalized coordinates
+                        if 0 <= center_x <= 1 and 0 <= center_y <= 1 and 0 < norm_width <= 1 and 0 < norm_height <= 1:
+                            yolo_annotations.append(
+                                f"{category_map[class_name]} {center_x:.6f} {center_y:.6f} {norm_width:.6f} {norm_height:.6f}"
+                            )
+                
+                # Save YOLO annotation
+                if yolo_annotations:  # Only save if there are annotations
+                    label_dst = self.dataset_path / "yolo" / "labels" / split_name / f"{new_name}.txt"
+                    with open(label_dst, 'w') as f:
+                        f.write('\n'.join(yolo_annotations))
+                    
+                    processed_count += 1
+                else:
+                    # Remove image if no valid annotations
+                    img_dst.unlink(missing_ok=True)
+                    coco_img_dst.unlink(missing_ok=True)
+                
+            except Exception as e:
+                print(f"Error processing {data_item['base_name']}: {e}")
+                continue
+        
+        # Save COCO annotations
+        coco_file = self.dataset_path / "coco" / "annotations" / f"{split_name}.json"
+        with open(coco_file, 'w') as f:
+            json.dump(coco_data, f, indent=2)
+        
+        return processed_count
+    
+    def _create_config_files(self, classes, data_splits):
+        """Create all necessary configuration files"""
+        
+        # YOLO data.yaml
+        yolo_yaml_content = f"""# A2D2 Dataset Configuration
+path: {self.dataset_path / 'yolo'}
+train: images/train
+val: images/val
+test: images/test
+
+nc: {len(classes)}
+names:
+"""
+        for i, class_name in enumerate(classes):
+            yolo_yaml_content += f"  {i}: {class_name}\n"
+        
+        with open(self.dataset_path / "yolo" / "data.yaml", 'w') as f:
+            f.write(yolo_yaml_content)
+        
+        # Classes file
+        with open(self.dataset_path / "yolo" / "classes.txt", 'w') as f:
+            for class_name in classes:
+                f.write(f"{class_name}\n")
+        
+        # Dataset info
+        dataset_info = {
+            "dataset_name": "A2D2_Fixed",
+            "total_images": sum(len(split_data) for split_data in data_splits.values()),
+            "num_classes": len(classes),
+            "classes": classes,
+            "splits": {name: len(data) for name, data in data_splits.items()}
+        }
+        
+        with open(self.dataset_path / "dataset_info.json", 'w') as f:
+            json.dump(dataset_info, f, indent=2)
+        
+        # Simple training script
+        train_script = f'''#!/usr/bin/env python3
+from ultralytics import YOLO
+
+def train_yolo():
+    model = YOLO('yolo11n.pt')
+    
+    results = model.train(
+        data='yolo/data.yaml',
+        epochs=100,
+        imgsz=640,
+        batch=16,
+        device=0,
+        project='a2d2_training_fixed',
+        name='experiment1',
+        save=True,
+        val=True,
+        plots=True
+    )
+    
+    print("Training completed!")
+    metrics = model.val()
+    print(f"mAP50: {{metrics.box.map50:.3f}}")
+
+if __name__ == "__main__":
+    train_yolo()
+'''
+        
+        script_dir = self.dataset_path / "scripts"
+        script_dir.mkdir(exist_ok=True)
+        with open(script_dir / "train_fixed.py", 'w') as f:
+            f.write(train_script)
+        
+        print("Configuration files created!")
+
+def main():
+    print("A2D2 Dataset Debugger and Fixer")
+    print("=" * 60)
+    
+    # Get paths
+    current_dataset = input("Enter path to current dataset directory (or press Enter for './a2d2_training_ready'): ").strip()
+    if not current_dataset:
+        current_dataset = "./a2d2_training_ready"
+    
+    original_a2d2 = input("Enter path to original A2D2 dataset (or press Enter for '.'): ").strip()
+    if not original_a2d2:
+        original_a2d2 = "."
+    
+    # Run diagnosis
+    debugger = A2D2DatasetDebugger(current_dataset)
+    issues = debugger.full_diagnostic()
+    
+    # Fix if needed
+    if issues:
+        print("\nIssues found. Do you want to fix them? (y/n): ", end="")
+        if input().lower().startswith('y'):
+            success = debugger.fix_all_issues(original_a2d2)
+            if success:
+                print("\nDataset fixed successfully!")
+                print("Ready to train:")
+                print(f"   cd {current_dataset}")
+                print("   python scripts/train_fixed.py")
+            else:
+                print("\n Failed to fix dataset. Please check the errors above.")
+    else:
+        print("\n Dataset looks good! Ready for training.")
+
+if __name__ == "__main__":
+    main()
