@@ -1,0 +1,57 @@
+auto dims = _engine->getBindingDimensions(0);
+int batch = dims.d[0];           // Should be 1
+int channels = dims.d[1];        // Should be 3  
+int height = dims.d[2];          // Should be 640
+int width = dims.d[3];           // Should be 640
+
+// Use the engine's actual dimensions, not hardcoded values
+Size TARGET_SHAPE(width, height);  // 640x640, not 960x540
+Scalar PAD_VALUE(114, 114, 114);
+
+vector<float> img;  // Fixed: vector not Vector
+vector<float> data(channels * height * width);  // Fixed: vector not Vector
+
+auto image = cv::imread("image.png", cv::IMREAD_COLOR);
+cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
+
+// Get original image dimensions
+int orig_width = image.cols;
+int orig_height = image.rows;
+
+// Calculate scale to maintain aspect ratio
+float scale = std::min((float)width / orig_width, (float)height / orig_height);
+
+// Calculate new dimensions after scaling
+int new_width = (int)(orig_width * scale);
+int new_height = (int)(orig_height * scale);
+
+// Resize image maintaining aspect ratio
+cv::resize(image, image, Size(new_width, new_height));
+
+// Calculate padding needed
+int pad_width = width - new_width;
+int pad_height = height - new_height;
+
+// Split padding evenly
+int pad_left = pad_width / 2;
+int pad_right = pad_width - pad_left;
+int pad_top = pad_height / 2;
+int pad_bottom = pad_height - pad_top;
+
+// Apply padding
+Mat padded_image;
+copyMakeBorder(image, padded_image, pad_top, pad_bottom, pad_left, pad_right, BORDER_CONSTANT, PAD_VALUE);
+
+// Convert to float and normalize
+Mat float_image;
+padded_image.convertTo(float_image, CV_32F, 1.0/255.0);
+
+// Convert HWC to CHW format for TensorRT
+vector<Mat> channels_bgr;
+split(float_image, channels_bgr);
+
+// Copy data in CHW order (Channel-Height-Width)
+int img_size = height * width;
+for (int c = 0; c < 3; ++c) {
+    memcpy(data.data() + c * img_size, channels_bgr[c].data, img_size * sizeof(float));
+}
