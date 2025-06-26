@@ -1,0 +1,396 @@
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <memory>
+#include <algorithm>
+#include <cmath>
+#include <NvInfer.h>
+#include <NvInferRuntime.h>
+#include <opencv2/opencv.hpp>
+
+class Logger : public nvinfer1::ILogger {
+public:
+    void log(Severity severity, const char* msg) noexcept override {
+        if (severity <= Severity::kWARNING) {
+            std::cout << "[TensorRT] " << msg << std::endl;
+        }
+    }
+};
+
+class YOLOv12xValidator {
+private:
+    std::unique_ptr<nvinfer1::IRuntime> runtime;
+    std::unique_ptr<nvinfer1::ICudaEngine> engine;
+    std::unique_ptr<nvinfer1::IExecutionContext> context;
+    Logger logger;
+    
+    struct InputInfo {
+        std::string name;
+        nvinfer1::Dims dims;
+        nvinfer1::DataType dataType;
+        int bindingIndex;
+        size_t size;
+    };
+    
+    struct OutputInfo {
+        std::string name;
+        nvinfer1::Dims dims;
+        nvinfer1::DataType dataType;
+        int bindingIndex;
+        size_t size;
+    };
+    
+    std::vector<InputInfo> inputs;
+    std::vector<OutputInfo> outputs;
+
+public:
+    YOLOv12xValidator() {
+        runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(logger));
+        if (!runtime) {
+            throw std::runtime_error("Failed to create TensorRT runtime");
+        }
+    }
+    
+    bool loadEngine(const std::string& enginePath) {
+        std::ifstream file(enginePath, std::ios::binary);
+        if (!file.good()) {
+            std::cerr << "Error: Cannot open engine file: " << enginePath << std::endl;
+            return false;
+        }
+        
+        // Get file size
+        file.seekg(0, std::ios::end);
+        size_t size = file.tellg();
+        file.seekg(0, std::ios::beg);
+        
+        // Read engine data
+        std::vector<char> engineData(size);
+        file.read(engineData.data(), size);
+        file.close();
+        
+        // Deserialize engine
+        engine = std::unique_ptr<nvinfer1::ICudaEngine>(
+            runtime->deserializeCudaEngine(engineData.data(), size));
+        
+        if (!engine) {
+            std::cerr << "Error: Failed to deserialize engine" << std::endl;
+            return false;
+        }
+        
+        context = std::unique_ptr<nvinfer1::IExecutionContext>(engine->createExecutionContext());
+        if (!context) {
+            std::cerr << "Error: Failed to create execution context" << std::endl;
+            return false;
+        }
+        
+        std::cout << "✓ Engine loaded successfully: " << enginePath << std::endl;
+        return true;
+    }
+    
+    void analyzeEngine() {
+        if (!engine) {
+            std::cerr << "Error: Engine not loaded" << std::endl;
+            return;
+        }
+        
+        std::cout << "\n=== Engine Analysis ===" << std::endl;
+        std::cout << "Engine name: " << engine->getName() << std::endl;
+        std::cout << "Number of bindings: " << engine->getNbBindings() << std::endl;
+        std::cout << "Max batch size: " << engine->getMaxBatchSize() << std::endl;
+        std::cout << "Device memory required: " << engine->getDeviceMemorySize() << " bytes" << std::endl;
+        
+        // Clear previous analysis
+        inputs.clear();
+        outputs.clear();
+        
+        // Analyze each binding
+        for (int i = 0; i < engine->getNbBindings(); ++i) {
+            const char* name = engine->getBindingName(i);
+            nvinfer1::Dims dims = engine->getBindingDimensions(i);
+            nvinfer1::DataType dataType = engine->getBindingDataType(i);
+            bool isInput = engine->bindingIsInput(i);
+            
+            size_t size = 1;
+            for (int j = 0; j < dims.nbDims; ++j) {
+                size *= dims.d[j];
+            }
+            
+            // Calculate size in bytes based on data type
+            size_t elementSize = 0;
+            switch (dataType) {
+                case nvinfer1::DataType::kFLOAT: elementSize = 4; break;
+                case nvinfer1::DataType::kHALF: elementSize = 2; break;
+                case nvinfer1::DataType::kINT8: elementSize = 1; break;
+                case nvinfer1::DataType::kINT32: elementSize = 4; break;
+                default: elementSize = 4; break;
+            }
+            size *= elementSize;
+            
+            std::cout << "\nBinding " << i << " (" << (isInput ? "INPUT" : "OUTPUT") << "):" << std::endl;
+            std::cout << "  Name: " << name << std::endl;
+            std::cout << "  Dimensions: ";
+            for (int j = 0; j < dims.nbDims; ++j) {
+                std::cout << dims.d[j];
+                if (j < dims.nbDims - 1) std::cout << "x";
+            }
+            std::cout << std::endl;
+            std::cout << "  Data type: " << static_cast<int>(dataType) << std::endl;
+            std::cout << "  Size: " << size << " bytes" << std::endl;
+            
+            if (isInput) {
+                inputs.push_back({name, dims, dataType, i, size});
+            } else {
+                outputs.push_back({name, dims, dataType, i, size});
+            }
+        }
+    }
+    
+    void printInputRequirements() {
+        if (inputs.empty()) {
+            std::cout << "\nNo input bindings found!" << std::endl;
+            return;
+        }
+        
+        std::cout << "\n=== Input Requirements ===" << std::endl;
+        
+        for (const auto& input : inputs) {
+            std::cout << "\nInput: " << input.name << std::endl;
+            
+            if (input.dims.nbDims == 4) {  // Typical YOLO input: [batch, channels, height, width]
+                int batch = input.dims.d[0];
+                int channels = input.dims.d[1];
+                int height = input.dims.d[2];
+                int width = input.dims.d[3];
+                
+                std::cout << "  Batch size: " << batch << std::endl;
+                std::cout << "  Channels: " << channels << std::endl;
+                std::cout << "  Input size: " << height << "x" << width << std::endl;
+                std::cout << "  Expected format: ";
+                if (channels == 3) {
+                    std::cout << "RGB" << std::endl;
+                } else if (channels == 1) {
+                    std::cout << "Grayscale" << std::endl;
+                } else {
+                    std::cout << "Unknown (" << channels << " channels)" << std::endl;
+                }
+            } else {
+                std::cout << "  Unexpected input dimensions!" << std::endl;
+            }
+        }
+    }
+    
+    struct PaddingInfo {
+        int top, bottom, left, right;
+        float scaleX, scaleY;
+        int newWidth, newHeight;
+    };
+    
+    PaddingInfo calculatePadding(int imgWidth, int imgHeight, int targetWidth, int targetHeight, 
+                                bool maintainAspectRatio = true) {
+        PaddingInfo padding = {0, 0, 0, 0, 1.0f, 1.0f, targetWidth, targetHeight};
+        
+        if (!maintainAspectRatio) {
+            // Simple resize without maintaining aspect ratio
+            padding.scaleX = static_cast<float>(targetWidth) / imgWidth;
+            padding.scaleY = static_cast<float>(targetHeight) / imgHeight;
+            return padding;
+        }
+        
+        // Calculate scale to fit image within target size while maintaining aspect ratio
+        float scaleX = static_cast<float>(targetWidth) / imgWidth;
+        float scaleY = static_cast<float>(targetHeight) / imgHeight;
+        float scale = std::min(scaleX, scaleY);
+        
+        padding.scaleX = padding.scaleY = scale;
+        
+        // Calculate new dimensions after scaling
+        int newWidth = static_cast<int>(imgWidth * scale);
+        int newHeight = static_cast<int>(imgHeight * scale);
+        
+        padding.newWidth = newWidth;
+        padding.newHeight = newHeight;
+        
+        // Calculate padding to center the image
+        int padX = (targetWidth - newWidth) / 2;
+        int padY = (targetHeight - newHeight) / 2;
+        
+        padding.left = padX;
+        padding.right = targetWidth - newWidth - padX;
+        padding.top = padY;
+        padding.bottom = targetHeight - newHeight - padY;
+        
+        return padding;
+    }
+    
+    void checkImageCompatibility(const std::string& imagePath) {
+        if (inputs.empty()) {
+            std::cout << "\nNo input information available. Run analyzeEngine() first." << std::endl;
+            return;
+        }
+        
+        // Load image
+        cv::Mat image = cv::imread(imagePath);
+        if (image.empty()) {
+            std::cerr << "Error: Cannot load image: " << imagePath << std::endl;
+            return;
+        }
+        
+        std::cout << "\n=== Image Compatibility Check ===" << std::endl;
+        std::cout << "Image: " << imagePath << std::endl;
+        std::cout << "Image size: " << image.cols << "x" << image.rows << std::endl;
+        std::cout << "Image channels: " << image.channels() << std::endl;
+        
+        // Check against first input (assuming it's the main input)
+        const auto& input = inputs[0];
+        if (input.dims.nbDims == 4) {
+            int targetChannels = input.dims.d[1];
+            int targetHeight = input.dims.d[2];
+            int targetWidth = input.dims.d[3];
+            
+            std::cout << "Required size: " << targetWidth << "x" << targetHeight << std::endl;
+            std::cout << "Required channels: " << targetChannels << std::endl;
+            
+            // Check channel compatibility
+            if (image.channels() != targetChannels) {
+                std::cout << "⚠ Channel mismatch! Image has " << image.channels() 
+                         << " channels, model expects " << targetChannels << std::endl;
+                if (targetChannels == 3 && image.channels() == 1) {
+                    std::cout << "  → Convert grayscale to RGB" << std::endl;
+                } else if (targetChannels == 1 && image.channels() == 3) {
+                    std::cout << "  → Convert RGB to grayscale" << std::endl;
+                }
+            } else {
+                std::cout << "✓ Channel compatibility OK" << std::endl;
+            }
+            
+            // Calculate padding
+            PaddingInfo padding = calculatePadding(image.cols, image.rows, targetWidth, targetHeight);
+            
+            std::cout << "\n=== Preprocessing Requirements ===" << std::endl;
+            std::cout << "Scale factor: " << padding.scaleX << std::endl;
+            std::cout << "Scaled size: " << padding.newWidth << "x" << padding.newHeight << std::endl;
+            std::cout << "Padding (LTRB): " << padding.left << ", " << padding.top 
+                     << ", " << padding.right << ", " << padding.bottom << std::endl;
+            
+            if (padding.left > 0 || padding.right > 0 || padding.top > 0 || padding.bottom > 0) {
+                std::cout << "Padding color recommendation: [114, 114, 114] (gray)" << std::endl;
+            }
+        }
+    }
+    
+    void printMemoryRequirements() {
+        if (inputs.empty() && outputs.empty()) {
+            std::cout << "\nNo binding information available." << std::endl;
+            return;
+        }
+        
+        std::cout << "\n=== Memory Requirements ===" << std::endl;
+        
+        size_t totalInputSize = 0;
+        size_t totalOutputSize = 0;
+        
+        for (const auto& input : inputs) {
+            totalInputSize += input.size;
+            std::cout << "Input buffer (" << input.name << "): " << input.size << " bytes" << std::endl;
+        }
+        
+        for (const auto& output : outputs) {
+            totalOutputSize += output.size;
+            std::cout << "Output buffer (" << output.name << "): " << output.size << " bytes" << std::endl;
+        }
+        
+        size_t totalSize = totalInputSize + totalOutputSize;
+        std::cout << "Total I/O memory: " << totalSize << " bytes (" 
+                 << totalSize / 1024.0 / 1024.0 << " MB)" << std::endl;
+        std::cout << "Device memory: " << engine->getDeviceMemorySize() << " bytes ("
+                 << engine->getDeviceMemorySize() / 1024.0 / 1024.0 << " MB)" << std::endl;
+    }
+    
+    bool validateEngine() {
+        if (!engine || !context) {
+            std::cerr << "Engine not properly loaded" << std::endl;
+            return false;
+        }
+        
+        std::cout << "\n=== Engine Validation ===" << std::endl;
+        
+        // Check if engine is valid
+        if (engine->getNbBindings() == 0) {
+            std::cerr << "✗ Engine has no bindings" << std::endl;
+            return false;
+        }
+        
+        // Check for typical YOLO structure
+        bool hasInput = false;
+        bool hasOutput = false;
+        
+        for (int i = 0; i < engine->getNbBindings(); ++i) {
+            if (engine->bindingIsInput(i)) {
+                hasInput = true;
+            } else {
+                hasOutput = true;
+            }
+        }
+        
+        if (!hasInput) {
+            std::cerr << "✗ No input bindings found" << std::endl;
+            return false;
+        }
+        
+        if (!hasOutput) {
+            std::cerr << "✗ No output bindings found" << std::endl;
+            return false;
+        }
+        
+        std::cout << "✓ Engine structure valid" << std::endl;
+        std::cout << "✓ Input/output bindings present" << std::endl;
+        
+        return true;
+    }
+};
+
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <engine_file> [image_file]" << std::endl;
+        return 1;
+    }
+    
+    std::string enginePath = argv[1];
+    std::string imagePath = (argc > 2) ? argv[2] : "";
+    
+    try {
+        YOLOv12xValidator validator;
+        
+        // Load and validate engine
+        if (!validator.loadEngine(enginePath)) {
+            return 1;
+        }
+        
+        if (!validator.validateEngine()) {
+            return 1;
+        }
+        
+        // Analyze engine structure
+        validator.analyzeEngine();
+        validator.printInputRequirements();
+        validator.printMemoryRequirements();
+        
+        // Check image compatibility if provided
+        if (!imagePath.empty()) {
+            validator.checkImageCompatibility(imagePath);
+        } else {
+            std::cout << "\n=== Image Testing ===" << std::endl;
+            std::cout << "To test image compatibility, run:" << std::endl;
+            std::cout << argv[0] << " " << enginePath << " <image_file>" << std::endl;
+        }
+        
+        std::cout << "\n✓ Engine validation complete!" << std::endl;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return 1;
+    }
+    
+    return 0;
+}
