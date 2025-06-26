@@ -44,6 +44,10 @@ public:
         }
     }
     
+    ~YOLOv12xValidator() {
+        // Smart pointers will handle cleanup automatically
+    }
+    
     bool loadEngine(const std::string& enginePath) {
         std::ifstream file(enginePath, std::ios::binary);
         if (!file.good()) {
@@ -88,11 +92,12 @@ public:
         
         std::cout << "\n=== Engine Analysis ===" << std::endl;
         
-        // Get basic engine information
+        // Get basic engine information (TensorRT 8.2 API)
         int nbBindings = engine->getNbBindings();
         std::cout << "Number of bindings: " << nbBindings << std::endl;
         std::cout << "Max batch size: " << engine->getMaxBatchSize() << std::endl;
-        std::cout << "Device memory required: " << engine->getDeviceMemorySize() << " bytes" << std::endl;
+        std::cout << "Device memory required: " << engine->getDeviceMemorySize() << " bytes ("
+                 << engine->getDeviceMemorySize() / 1024.0 / 1024.0 << " MB)" << std::endl;
         
         // Check if engine has implicit batch dimension
         bool hasImplicitBatch = engine->hasImplicitBatchDimension();
@@ -115,7 +120,7 @@ public:
                 }
             }
             
-            // Calculate size in bytes based on data type
+            // Calculate size in bytes based on data type (TensorRT 8.2 types only)
             size_t elementSize = 0;
             switch (dataType) {
                 case nvinfer1::DataType::kFLOAT: elementSize = 4; break;
@@ -395,25 +400,34 @@ public:
             
             if (padding.left > 0 || padding.right > 0 || padding.top > 0 || padding.bottom > 0) {
                 std::cout << "Padding color: [114, 114, 114] (gray)" << std::endl;
-                std::cout << "OpenCV padding call:" << std::endl;
+                std::cout << "\nOpenCV preprocessing code:" << std::endl;
+                std::cout << "  cv::Mat resized, padded;" << std::endl;
                 std::cout << "  cv::resize(image, resized, cv::Size(" << padding.newWidth 
                          << ", " << padding.newHeight << "));" << std::endl;
                 std::cout << "  cv::copyMakeBorder(resized, padded, " << padding.top << ", " 
                          << padding.bottom << ", " << padding.left << ", " << padding.right 
                          << ", cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));" << std::endl;
+            } else {
+                std::cout << "No padding needed - direct resize:" << std::endl;
+                std::cout << "  cv::resize(image, resized, cv::Size(" << targetWidth 
+                         << ", " << targetHeight << "));" << std::endl;
             }
             
             // Data type conversion info
             std::cout << "\nData conversion steps:" << std::endl;
             std::cout << "  1. Resize and pad image to " << targetWidth << "x" << targetHeight << std::endl;
             std::cout << "  2. Convert to float: image.convertTo(floatImg, CV_32F, 1.0/255.0)" << std::endl;
-            std::cout << "  3. Normalize if needed (model-dependent)" << std::endl;
+            std::cout << "  3. Normalize if needed (model-dependent, e.g., ImageNet mean/std)" << std::endl;
             if (engine->hasImplicitBatchDimension()) {
-                std::cout << "  4. Convert HWC to CHW format (implicit batch)" << std::endl;
+                std::cout << "  4. Convert HWC to CHW format (for implicit batch)" << std::endl;
+                std::cout << "     std::vector<cv::Mat> channels(3);" << std::endl;
+                std::cout << "     cv::split(floatImg, channels);" << std::endl;
+                std::cout << "     // Copy channels[0], channels[1], channels[2] to buffer" << std::endl;
             } else {
-                std::cout << "  4. Convert HWC to NCHW format (explicit batch)" << std::endl;
+                std::cout << "  4. Convert HWC to NCHW format (for explicit batch)" << std::endl;
+                std::cout << "     // Add batch dimension and convert channel order" << std::endl;
             }
-            std::cout << "  5. Copy to GPU memory" << std::endl;
+            std::cout << "  5. Copy to GPU memory using cudaMemcpy" << std::endl;
         }
     }
     
@@ -452,20 +466,25 @@ public:
         size_t totalIOSize = totalInputSize + totalOutputSize;
         size_t deviceMemory = engine->getDeviceMemorySize();
         
-        std::cout << "Total I/O memory: " << totalIOSize << " bytes (" 
+        std::cout << "\nTotal I/O memory: " << totalIOSize << " bytes (" 
                  << totalIOSize / 1024.0 / 1024.0 << " MB)" << std::endl;
         std::cout << "Device memory: " << deviceMemory << " bytes ("
                  << deviceMemory / 1024.0 / 1024.0 << " MB)" << std::endl;
         std::cout << "Total GPU memory needed: " << (totalIOSize + deviceMemory) << " bytes ("
                  << (totalIOSize + deviceMemory) / 1024.0 / 1024.0 << " MB)" << std::endl;
         
-        // Memory allocation guidance
-        std::cout << "\nMemory allocation guidance:" << std::endl;
+        // Memory allocation guidance for TensorRT 8.2
+        std::cout << "\nMemory allocation code (TensorRT 8.2):" << std::endl;
         std::cout << "void* buffers[" << bindings.size() << "];" << std::endl;
         for (const auto& binding : bindings) {
             std::cout << "cudaMalloc(&buffers[" << binding.bindingIndex << "], " 
-                     << binding.size << "); // " << binding.name << std::endl;
+                     << binding.size << "); // " << binding.name << " (" 
+                     << (binding.isInput ? "input" : "output") << ")" << std::endl;
         }
+        std::cout << "\n// Don't forget to free memory:" << std::endl;
+        std::cout << "for (int i = 0; i < " << bindings.size() << "; i++) {" << std::endl;
+        std::cout << "    cudaFree(buffers[i]);" << std::endl;
+        std::cout << "}" << std::endl;
     }
     
     bool validateEngine() {
@@ -538,50 +557,88 @@ public:
     }
     
     void printAdvancedInfo() {
-        std::cout << "\n=== Advanced Engine Information ===" << std::endl;
+        std::cout << "\n=== TensorRT 8.2 Engine Information ===" << std::endl;
         
         std::cout << "TensorRT version: " << NV_TENSORRT_MAJOR << "." 
                  << NV_TENSORRT_MINOR << "." << NV_TENSORRT_PATCH << std::endl;
         
         // Check batch dimension type
         if (engine->hasImplicitBatchDimension()) {
-            std::cout << "Batch mode: Implicit (older TensorRT style)" << std::endl;
-            std::cout << "Max batch size: " << engine->getMaxBatchSize() << std::endl;
+            std::cout << "context->enqueue(1, buffers, stream, nullptr);" << std::endl;
         } else {
-            std::cout << "Batch mode: Explicit (modern TensorRT style)" << std::endl;
+            std::cout << "context->enqueueV2(buffers, stream, nullptr);" << std::endl;
         }
-        
-        // Check optimization profiles for dynamic shapes
-        if (!engine->hasImplicitBatchDimension()) {
-            int nbProfiles = engine->getNbOptimizationProfiles();
-            std::cout << "Number of optimization profiles: " << nbProfiles << std::endl;
-            
-            if (nbProfiles > 1) {
-                std::cout << "⚠ Multiple optimization profiles detected - dynamic shapes supported" << std::endl;
-            }
-        }
-        
-        std::cout << "\nBinding details:" << std::endl;
+        std::cout << "// Copy output data from GPU" << std::endl;
         for (const auto& binding : bindings) {
-            std::cout << "  " << binding.name << " (index " << binding.bindingIndex << "): ";
-            if (binding.isInput) {
-                std::cout << "INPUT";
-            } else {
-                std::cout << "OUTPUT";
+            if (!binding.isInput) {
+                std::cout << "cudaMemcpyAsync(hostOutput, buffers[" << binding.bindingIndex 
+                         << "], " << binding.size 
+                         << ", cudaMemcpyDeviceToHost, stream);" << std::endl;
+                break; // Just show first output
             }
-            std::cout << " - " << getDataTypeName(binding.dataType) << std::endl;
+        }
+        std::cout << "cudaStreamSynchronize(stream);" << std::endl;
+        std::cout << "cudaStreamDestroy(stream);" << std::endl;
+    }
+    
+    void printInferenceGuidance() {
+        std::cout << "\n=== Step-by-Step Inference Guide ===" << std::endl;
+        
+        std::cout << "\n1. Memory Allocation:" << std::endl;
+        std::cout << "   void* buffers[" << bindings.size() << "];" << std::endl;
+        for (const auto& binding : bindings) {
+            std::cout << "   cudaMalloc(&buffers[" << binding.bindingIndex << "], " 
+                     << binding.size << "); // " << binding.name << std::endl;
         }
         
-        // Inference execution guidance
-        std::cout << "\nInference execution (TensorRT 8.2):" << std::endl;
+        std::cout << "\n2. Input Preprocessing:" << std::endl;
+        std::cout << "   - Load and resize image to target dimensions" << std::endl;
+        std::cout << "   - Apply letterbox padding if maintaining aspect ratio" << std::endl;
+        std::cout << "   - Convert to float and normalize (typically /255.0)" << std::endl;
         if (engine->hasImplicitBatchDimension()) {
-            std::cout << "  Use context->enqueue(batchSize, buffers, stream, nullptr)" << std::endl;
-            std::cout << "  Or context->execute(batchSize, buffers)" << std::endl;
+            std::cout << "   - Convert HWC to CHW format" << std::endl;
         } else {
-            std::cout << "  Use context->enqueueV2(buffers, stream, nullptr)" << std::endl;
-            std::cout << "  Or context->executeV2(buffers)" << std::endl;
-            std::cout << "  Set dynamic shapes with context->setBindingDimensions() if needed" << std::endl;
+            std::cout << "   - Convert HWC to NCHW format (add batch dimension)" << std::endl;
         }
+        
+        std::cout << "\n3. Copy Input to GPU:" << std::endl;
+        for (const auto& binding : bindings) {
+            if (binding.isInput) {
+                std::cout << "   cudaMemcpy(buffers[" << binding.bindingIndex 
+                         << "], preprocessedData, " << binding.size 
+                         << ", cudaMemcpyHostToDevice);" << std::endl;
+            }
+        }
+        
+        std::cout << "\n4. Execute Inference:" << std::endl;
+        if (engine->hasImplicitBatchDimension()) {
+            std::cout << "   context->execute(batchSize, buffers); // batchSize <= " 
+                     << engine->getMaxBatchSize() << std::endl;
+        } else {
+            std::cout << "   // Set dynamic shapes if needed:" << std::endl;
+            std::cout << "   // context->setBindingDimensions(inputIndex, actualDims);" << std::endl;
+            std::cout << "   context->executeV2(buffers);" << std::endl;
+        }
+        
+        std::cout << "\n5. Copy Output from GPU:" << std::endl;
+        for (const auto& binding : bindings) {
+            if (!binding.isInput) {
+                std::cout << "   float* outputData = new float[" << binding.size/4 << "];" << std::endl;
+                std::cout << "   cudaMemcpy(outputData, buffers[" << binding.bindingIndex 
+                         << "], " << binding.size << ", cudaMemcpyDeviceToHost);" << std::endl;
+            }
+        }
+        
+        std::cout << "\n6. Post-processing:" << std::endl;
+        std::cout << "   - Parse output tensors (detections, scores, classes)" << std::endl;
+        std::cout << "   - Apply NMS (Non-Maximum Suppression)" << std::endl;
+        std::cout << "   - Scale coordinates back to original image size" << std::endl;
+        std::cout << "   - Account for letterbox padding in coordinate scaling" << std::endl;
+        
+        std::cout << "\n7. Cleanup:" << std::endl;
+        std::cout << "   for (int i = 0; i < " << bindings.size() << "; i++) {" << std::endl;
+        std::cout << "       cudaFree(buffers[i]);" << std::endl;
+        std::cout << "   }" << std::endl;
     }
 };
 
@@ -599,10 +656,12 @@ int main(int argc, char* argv[]) {
         YOLOv12xValidator validator;
         
         // Load and validate engine
+        std::cout << "Loading TensorRT engine..." << std::endl;
         if (!validator.loadEngine(enginePath)) {
             return 1;
         }
         
+        std::cout << "Validating engine structure..." << std::endl;
         if (!validator.validateEngine()) {
             return 1;
         }
@@ -622,18 +681,11 @@ int main(int argc, char* argv[]) {
             std::cout << argv[0] << " " << enginePath << " <image_file>" << std::endl;
         }
         
+        // Print step-by-step inference guidance
+        validator.printInferenceGuidance();
+        
         std::cout << "\n✓ Engine validation complete!" << std::endl;
-        std::cout << "\nNext steps for inference:" << std::endl;
-        std::cout << "1. Allocate GPU memory for input/output buffers" << std::endl;
-        std::cout << "2. Preprocess images (resize, pad, normalize, HWC→CHW/NCHW)" << std::endl;
-        std::cout << "3. Copy input data to GPU using cudaMemcpy" << std::endl;
-        if (validator.engine && validator.engine->hasImplicitBatchDimension()) {
-            std::cout << "4. Run inference using context->enqueue() or execute()" << std::endl;
-        } else {
-            std::cout << "4. Set dynamic shapes if needed with setBindingDimensions()" << std::endl;
-            std::cout << "5. Run inference using context->enqueueV2() or executeV2()" << std::endl;
-        }
-        std::cout << "6. Copy output data from GPU and post-process" << std::endl;
+        std::cout << "\nYour YOLOv12x engine is ready for inference with TensorRT 8.2!" << std::endl;
         
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
@@ -641,4 +693,71 @@ int main(int argc, char* argv[]) {
     }
     
     return 0;
-}
+} << "Batch mode: Implicit (TensorRT 8.x style)" << std::endl;
+            std::cout << "Max batch size: " << engine->getMaxBatchSize() << std::endl;
+        } else {
+            std::cout << "Batch mode: Explicit (modern style)" << std::endl;
+        }
+        
+        std::cout << "\nBinding summary:" << std::endl;
+        int inputCount = 0, outputCount = 0;
+        for (const auto& binding : bindings) {
+            if (binding.isInput) {
+                inputCount++;
+            } else {
+                outputCount++;
+            }
+        }
+        std::cout << "  Inputs: " << inputCount << std::endl;
+        std::cout << "  Outputs: " << outputCount << std::endl;
+        
+        std::cout << "\nBinding details:" << std::endl;
+        for (const auto& binding : bindings) {
+            std::cout << "  [" << binding.bindingIndex << "] " << binding.name << ": ";
+            if (binding.isInput) {
+                std::cout << "INPUT";
+            } else {
+                std::cout << "OUTPUT";
+            }
+            std::cout << " - " << getDataTypeName(binding.dataType);
+            
+            // Show shape
+            std::cout << " (";
+            for (int j = 0; j < binding.dims.nbDims; ++j) {
+                std::cout << binding.dims.d[j];
+                if (j < binding.dims.nbDims - 1) std::cout << "x";
+            }
+            std::cout << ")" << std::endl;
+        }
+        
+        // Inference execution guidance for TensorRT 8.2
+        std::cout << "\n=== Inference Code Template (TensorRT 8.2) ===" << std::endl;
+        if (engine->hasImplicitBatchDimension()) {
+            std::cout << "// For implicit batch engines:" << std::endl;
+            std::cout << "int batchSize = 1; // or desired batch size <= " << engine->getMaxBatchSize() << std::endl;
+            std::cout << "bool success = context->enqueue(batchSize, buffers, stream, nullptr);" << std::endl;
+            std::cout << "// Or synchronous:" << std::endl;
+            std::cout << "bool success = context->execute(batchSize, buffers);" << std::endl;
+        } else {
+            std::cout << "// For explicit batch engines:" << std::endl;
+            std::cout << "// Set dynamic shapes if needed:" << std::endl;
+            std::cout << "// context->setBindingDimensions(inputIndex, nvinfer1::Dims4{1, 3, 640, 640});" << std::endl;
+            std::cout << "bool success = context->enqueueV2(buffers, stream, nullptr);" << std::endl;
+            std::cout << "// Or synchronous:" << std::endl;
+            std::cout << "bool success = context->executeV2(buffers);" << std::endl;
+        }
+        
+        std::cout << "\n// Complete inference example:" << std::endl;
+        std::cout << "cudaStream_t stream;" << std::endl;
+        std::cout << "cudaStreamCreate(&stream);" << std::endl;
+        std::cout << "// Copy input data to GPU" << std::endl;
+        for (const auto& binding : bindings) {
+            if (binding.isInput) {
+                std::cout << "cudaMemcpyAsync(buffers[" << binding.bindingIndex 
+                         << "], hostInput, " << binding.size 
+                         << ", cudaMemcpyHostToDevice, stream);" << std::endl;
+                break; // Just show first input
+            }
+        }
+        if (engine->hasImplicitBatchDimension()) {
+            std::cout
