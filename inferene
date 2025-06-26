@@ -25,15 +25,16 @@ private:
     std::unique_ptr<nvinfer1::IExecutionContext> context;
     Logger logger;
     
-    struct TensorInfo {
+    struct BindingInfo {
         std::string name;
         nvinfer1::Dims dims;
         nvinfer1::DataType dataType;
         bool isInput;
+        int bindingIndex;
         size_t size;
     };
     
-    std::vector<TensorInfo> tensors;
+    std::vector<BindingInfo> bindings;
 
 public:
     YOLOv12xValidator() {
@@ -86,30 +87,32 @@ public:
         }
         
         std::cout << "\n=== Engine Analysis ===" << std::endl;
-        std::cout << "Engine name: " << engine->getName() << std::endl;
         
-        // Use modern API - getNbIOTensors instead of getNbBindings
-        int32_t nbIOTensors = engine->getNbIOTensors();
-        std::cout << "Number of I/O tensors: " << nbIOTensors << std::endl;
+        // Get basic engine information
+        int nbBindings = engine->getNbBindings();
+        std::cout << "Number of bindings: " << nbBindings << std::endl;
+        std::cout << "Max batch size: " << engine->getMaxBatchSize() << std::endl;
+        std::cout << "Device memory required: " << engine->getDeviceMemorySize() << " bytes" << std::endl;
         
-        // Memory information using V2 APIs
-        std::cout << "Device memory required: " << engine->getDeviceMemorySizeV2() << " bytes" << std::endl;
-        std::cout << "Number of layers: " << engine->getNbLayers() << std::endl;
+        // Check if engine has implicit batch dimension
+        bool hasImplicitBatch = engine->hasImplicitBatchDimension();
+        std::cout << "Has implicit batch dimension: " << (hasImplicitBatch ? "Yes" : "No") << std::endl;
         
         // Clear previous analysis
-        tensors.clear();
+        bindings.clear();
         
-        // Analyze each tensor using modern API
-        for (int32_t i = 0; i < nbIOTensors; ++i) {
-            const char* name = engine->getIOTensorName(i);
-            nvinfer1::Dims dims = engine->getTensorShape(name);
-            nvinfer1::DataType dataType = engine->getTensorDataType(name);
-            nvinfer1::TensorIOMode ioMode = engine->getTensorIOMode(name);
-            bool isInput = (ioMode == nvinfer1::TensorIOMode::kINPUT);
+        // Analyze each binding
+        for (int i = 0; i < nbBindings; ++i) {
+            const char* name = engine->getBindingName(i);
+            nvinfer1::Dims dims = engine->getBindingDimensions(i);
+            nvinfer1::DataType dataType = engine->getBindingDataType(i);
+            bool isInput = engine->bindingIsInput(i);
             
             size_t elementCount = 1;
             for (int j = 0; j < dims.nbDims; ++j) {
-                elementCount *= dims.d[j];
+                if (dims.d[j] > 0) {
+                    elementCount *= dims.d[j];
+                }
             }
             
             // Calculate size in bytes based on data type
@@ -120,15 +123,11 @@ public:
                 case nvinfer1::DataType::kINT8: elementSize = 1; break;
                 case nvinfer1::DataType::kINT32: elementSize = 4; break;
                 case nvinfer1::DataType::kBOOL: elementSize = 1; break;
-                case nvinfer1::DataType::kUINT8: elementSize = 1; break;
-                case nvinfer1::DataType::kFP8: elementSize = 1; break;
-                case nvinfer1::DataType::kBF16: elementSize = 2; break;
-                case nvinfer1::DataType::kINT64: elementSize = 8; break;
                 default: elementSize = 4; break;
             }
             size_t totalSize = elementCount * elementSize;
             
-            std::cout << "\nTensor " << i << " (" << (isInput ? "INPUT" : "OUTPUT") << "):" << std::endl;
+            std::cout << "\nBinding " << i << " (" << (isInput ? "INPUT" : "OUTPUT") << "):" << std::endl;
             std::cout << "  Name: " << name << std::endl;
             std::cout << "  Dimensions: ";
             for (int j = 0; j < dims.nbDims; ++j) {
@@ -137,9 +136,27 @@ public:
             }
             std::cout << std::endl;
             std::cout << "  Data type: " << getDataTypeName(dataType) << std::endl;
-            std::cout << "  Size: " << totalSize << " bytes (" << totalSize / 1024.0 / 1024.0 << " MB)" << std::endl;
+            std::cout << "  Size: " << totalSize << " bytes";
+            if (totalSize > 1024 * 1024) {
+                std::cout << " (" << totalSize / 1024.0 / 1024.0 << " MB)";
+            } else if (totalSize > 1024) {
+                std::cout << " (" << totalSize / 1024.0 << " KB)";
+            }
+            std::cout << std::endl;
             
-            tensors.push_back({name, dims, dataType, isInput, totalSize});
+            // Check for dynamic dimensions
+            bool hasDynamicDims = false;
+            for (int j = 0; j < dims.nbDims; ++j) {
+                if (dims.d[j] == -1) {
+                    hasDynamicDims = true;
+                    break;
+                }
+            }
+            if (hasDynamicDims) {
+                std::cout << "  ⚠ Contains dynamic dimensions" << std::endl;
+            }
+            
+            bindings.push_back({name, dims, dataType, isInput, i, totalSize});
         }
     }
     
@@ -150,31 +167,27 @@ public:
             case nvinfer1::DataType::kINT8: return "INT8";
             case nvinfer1::DataType::kINT32: return "INT32";
             case nvinfer1::DataType::kBOOL: return "BOOL";
-            case nvinfer1::DataType::kUINT8: return "UINT8";
-            case nvinfer1::DataType::kFP8: return "FP8";
-            case nvinfer1::DataType::kBF16: return "BFLOAT16";
-            case nvinfer1::DataType::kINT64: return "INT64";
             default: return "UNKNOWN";
         }
     }
     
     void printInputRequirements() {
-        std::vector<TensorInfo> inputs;
-        for (const auto& tensor : tensors) {
-            if (tensor.isInput) {
-                inputs.push_back(tensor);
+        std::vector<BindingInfo> inputs;
+        for (const auto& binding : bindings) {
+            if (binding.isInput) {
+                inputs.push_back(binding);
             }
         }
         
         if (inputs.empty()) {
-            std::cout << "\nNo input tensors found!" << std::endl;
+            std::cout << "\nNo input bindings found!" << std::endl;
             return;
         }
         
         std::cout << "\n=== Input Requirements ===" << std::endl;
         
         for (const auto& input : inputs) {
-            std::cout << "\nInput: " << input.name << std::endl;
+            std::cout << "\nInput: " << input.name << " (binding " << input.bindingIndex << ")" << std::endl;
             
             if (input.dims.nbDims == 4) {  // Typical YOLO input: [batch, channels, height, width]
                 int batch = input.dims.d[0];
@@ -182,24 +195,56 @@ public:
                 int height = input.dims.d[2];
                 int width = input.dims.d[3];
                 
-                std::cout << "  Batch size: " << batch << std::endl;
+                // Handle implicit batch dimension
+                if (engine->hasImplicitBatchDimension()) {
+                    std::cout << "  Implicit batch size: " << engine->getMaxBatchSize() << std::endl;
+                    std::cout << "  Channels: " << batch << std::endl;  // First dim is channels for implicit batch
+                    std::cout << "  Input size: " << channels << "x" << height << std::endl;
+                    
+                    if (batch == 3) {
+                        std::cout << "  Expected format: RGB" << std::endl;
+                    } else if (batch == 1) {
+                        std::cout << "  Expected format: Grayscale" << std::endl;
+                    } else {
+                        std::cout << "  Expected format: Unknown (" << batch << " channels)" << std::endl;
+                    }
+                } else {
+                    std::cout << "  Batch size: " << batch << std::endl;
+                    std::cout << "  Channels: " << channels << std::endl;
+                    std::cout << "  Input size: " << height << "x" << width << std::endl;
+                    
+                    if (channels == 3) {
+                        std::cout << "  Expected format: RGB" << std::endl;
+                    } else if (channels == 1) {
+                        std::cout << "  Expected format: Grayscale" << std::endl;
+                    } else {
+                        std::cout << "  Expected format: Unknown (" << channels << " channels)" << std::endl;
+                    }
+                    
+                    // Check for dynamic shapes
+                    if (batch == -1) {
+                        std::cout << "  Dynamic batch size detected" << std::endl;
+                    }
+                    if (height == -1 || width == -1) {
+                        std::cout << "  Dynamic input dimensions detected" << std::endl;
+                    }
+                }
+            } else if (input.dims.nbDims == 3 && engine->hasImplicitBatchDimension()) {
+                // CHW format with implicit batch
+                int channels = input.dims.d[0];
+                int height = input.dims.d[1];
+                int width = input.dims.d[2];
+                
+                std::cout << "  Implicit batch size: " << engine->getMaxBatchSize() << std::endl;
                 std::cout << "  Channels: " << channels << std::endl;
                 std::cout << "  Input size: " << height << "x" << width << std::endl;
-                std::cout << "  Expected format: ";
-                if (channels == 3) {
-                    std::cout << "RGB" << std::endl;
-                } else if (channels == 1) {
-                    std::cout << "Grayscale" << std::endl;
-                } else {
-                    std::cout << "Unknown (" << channels << " channels)" << std::endl;
-                }
                 
-                // Check for dynamic shapes
-                if (batch == -1) {
-                    std::cout << "  Dynamic batch size detected" << std::endl;
-                }
-                if (height == -1 || width == -1) {
-                    std::cout << "  Dynamic input dimensions detected" << std::endl;
+                if (channels == 3) {
+                    std::cout << "  Expected format: RGB" << std::endl;
+                } else if (channels == 1) {
+                    std::cout << "  Expected format: Grayscale" << std::endl;
+                } else {
+                    std::cout << "  Expected format: Unknown (" << channels << " channels)" << std::endl;
                 }
             } else {
                 std::cout << "  Unexpected input dimensions (ndims=" << input.dims.nbDims << ")!" << std::endl;
@@ -258,10 +303,10 @@ public:
     }
     
     void checkImageCompatibility(const std::string& imagePath) {
-        std::vector<TensorInfo> inputs;
-        for (const auto& tensor : tensors) {
-            if (tensor.isInput) {
-                inputs.push_back(tensor);
+        std::vector<BindingInfo> inputs;
+        for (const auto& binding : bindings) {
+            if (binding.isInput) {
+                inputs.push_back(binding);
             }
         }
         
@@ -285,69 +330,96 @@ public:
         
         // Check against first input (assuming it's the main input)
         const auto& input = inputs[0];
-        if (input.dims.nbDims == 4) {
-            int targetBatch = input.dims.d[0];
-            int targetChannels = input.dims.d[1];
-            int targetHeight = input.dims.d[2];
-            int targetWidth = input.dims.d[3];
-            
-            std::cout << "Required batch: " << targetBatch << std::endl;
-            std::cout << "Required size: " << targetWidth << "x" << targetHeight << std::endl;
-            std::cout << "Required channels: " << targetChannels << std::endl;
-            
-            // Check for dynamic dimensions
-            if (targetBatch == -1) {
-                std::cout << "✓ Dynamic batch size - any batch size supported" << std::endl;
-            }
-            if (targetHeight == -1 || targetWidth == -1) {
-                std::cout << "✓ Dynamic input size - various sizes supported" << std::endl;
-                std::cout << "  Note: You'll need to set tensor shapes at runtime using setInputShape()" << std::endl;
-            }
-            
-            // Check channel compatibility
-            if (image.channels() != targetChannels && targetChannels != -1) {
-                std::cout << "⚠ Channel mismatch! Image has " << image.channels() 
-                         << " channels, model expects " << targetChannels << std::endl;
-                if (targetChannels == 3 && image.channels() == 1) {
-                    std::cout << "  → Convert grayscale to RGB using cv::cvtColor(img, img, cv::COLOR_GRAY2RGB)" << std::endl;
-                } else if (targetChannels == 1 && image.channels() == 3) {
-                    std::cout << "  → Convert RGB to grayscale using cv::cvtColor(img, img, cv::COLOR_RGB2GRAY)" << std::endl;
-                }
+        
+        int targetChannels, targetHeight, targetWidth, targetBatch;
+        
+        if (engine->hasImplicitBatchDimension()) {
+            if (input.dims.nbDims == 3) {
+                // CHW format with implicit batch
+                targetBatch = engine->getMaxBatchSize();
+                targetChannels = input.dims.d[0];
+                targetHeight = input.dims.d[1];
+                targetWidth = input.dims.d[2];
             } else {
-                std::cout << "✓ Channel compatibility OK" << std::endl;
+                std::cout << "Unexpected input format for implicit batch engine" << std::endl;
+                return;
+            }
+        } else {
+            if (input.dims.nbDims == 4) {
+                // NCHW format with explicit batch
+                targetBatch = input.dims.d[0];
+                targetChannels = input.dims.d[1];
+                targetHeight = input.dims.d[2];
+                targetWidth = input.dims.d[3];
+            } else {
+                std::cout << "Unexpected input format for explicit batch engine" << std::endl;
+                return;
+            }
+        }
+        
+        std::cout << "Required batch: " << targetBatch << std::endl;
+        std::cout << "Required size: " << targetWidth << "x" << targetHeight << std::endl;
+        std::cout << "Required channels: " << targetChannels << std::endl;
+        
+        // Check for dynamic dimensions
+        if (targetBatch == -1) {
+            std::cout << "✓ Dynamic batch size - any batch size supported" << std::endl;
+        }
+        if (targetHeight == -1 || targetWidth == -1) {
+            std::cout << "✓ Dynamic input size - various sizes supported" << std::endl;
+            std::cout << "  Note: You'll need to set binding dimensions at runtime using setBindingDimensions()" << std::endl;
+        }
+        
+        // Check channel compatibility
+        if (image.channels() != targetChannels && targetChannels != -1) {
+            std::cout << "⚠ Channel mismatch! Image has " << image.channels() 
+                     << " channels, model expects " << targetChannels << std::endl;
+            if (targetChannels == 3 && image.channels() == 1) {
+                std::cout << "  → Convert grayscale to RGB using cv::cvtColor(img, img, cv::COLOR_GRAY2RGB)" << std::endl;
+            } else if (targetChannels == 1 && image.channels() == 3) {
+                std::cout << "  → Convert RGB to grayscale using cv::cvtColor(img, img, cv::COLOR_RGB2GRAY)" << std::endl;
+            }
+        } else {
+            std::cout << "✓ Channel compatibility OK" << std::endl;
+        }
+        
+        // Calculate padding only for fixed sizes
+        if (targetHeight > 0 && targetWidth > 0) {
+            PaddingInfo padding = calculatePadding(image.cols, image.rows, targetWidth, targetHeight);
+            
+            std::cout << "\n=== Preprocessing Requirements ===" << std::endl;
+            std::cout << "Scale factor: " << padding.scale << std::endl;
+            std::cout << "Scaled size: " << padding.newWidth << "x" << padding.newHeight << std::endl;
+            std::cout << "Padding (LTRB): " << padding.left << ", " << padding.top 
+                     << ", " << padding.right << ", " << padding.bottom << std::endl;
+            
+            if (padding.left > 0 || padding.right > 0 || padding.top > 0 || padding.bottom > 0) {
+                std::cout << "Padding color: [114, 114, 114] (gray)" << std::endl;
+                std::cout << "OpenCV padding call:" << std::endl;
+                std::cout << "  cv::resize(image, resized, cv::Size(" << padding.newWidth 
+                         << ", " << padding.newHeight << "));" << std::endl;
+                std::cout << "  cv::copyMakeBorder(resized, padded, " << padding.top << ", " 
+                         << padding.bottom << ", " << padding.left << ", " << padding.right 
+                         << ", cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));" << std::endl;
             }
             
-            // Calculate padding only for fixed sizes
-            if (targetHeight > 0 && targetWidth > 0) {
-                PaddingInfo padding = calculatePadding(image.cols, image.rows, targetWidth, targetHeight);
-                
-                std::cout << "\n=== Preprocessing Requirements ===" << std::endl;
-                std::cout << "Scale factor: " << padding.scale << std::endl;
-                std::cout << "Scaled size: " << padding.newWidth << "x" << padding.newHeight << std::endl;
-                std::cout << "Padding (LTRB): " << padding.left << ", " << padding.top 
-                         << ", " << padding.right << ", " << padding.bottom << std::endl;
-                
-                if (padding.left > 0 || padding.right > 0 || padding.top > 0 || padding.bottom > 0) {
-                    std::cout << "Padding color: [114, 114, 114] (gray)" << std::endl;
-                    std::cout << "OpenCV padding call:" << std::endl;
-                    std::cout << "  cv::copyMakeBorder(resized, padded, " << padding.top << ", " 
-                             << padding.bottom << ", " << padding.left << ", " << padding.right 
-                             << ", cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));" << std::endl;
-                }
-                
-                // Data type conversion info
-                std::cout << "\nData conversion:" << std::endl;
-                std::cout << "  1. Convert to float: image.convertTo(floatImg, CV_32F, 1.0/255.0)" << std::endl;
-                std::cout << "  2. Normalize if needed (depends on training)" << std::endl;
-                std::cout << "  3. Convert HWC to CHW format" << std::endl;
-                std::cout << "  4. Copy to GPU memory" << std::endl;
+            // Data type conversion info
+            std::cout << "\nData conversion steps:" << std::endl;
+            std::cout << "  1. Resize and pad image to " << targetWidth << "x" << targetHeight << std::endl;
+            std::cout << "  2. Convert to float: image.convertTo(floatImg, CV_32F, 1.0/255.0)" << std::endl;
+            std::cout << "  3. Normalize if needed (model-dependent)" << std::endl;
+            if (engine->hasImplicitBatchDimension()) {
+                std::cout << "  4. Convert HWC to CHW format (implicit batch)" << std::endl;
+            } else {
+                std::cout << "  4. Convert HWC to NCHW format (explicit batch)" << std::endl;
             }
+            std::cout << "  5. Copy to GPU memory" << std::endl;
         }
     }
     
     void printMemoryRequirements() {
-        if (tensors.empty()) {
-            std::cout << "\nNo tensor information available." << std::endl;
+        if (bindings.empty()) {
+            std::cout << "\nNo binding information available." << std::endl;
             return;
         }
         
@@ -356,20 +428,29 @@ public:
         size_t totalInputSize = 0;
         size_t totalOutputSize = 0;
         
-        for (const auto& tensor : tensors) {
-            if (tensor.isInput) {
-                totalInputSize += tensor.size;
-                std::cout << "Input buffer (" << tensor.name << "): " << tensor.size 
-                         << " bytes (" << tensor.size / 1024.0 / 1024.0 << " MB)" << std::endl;
+        for (const auto& binding : bindings) {
+            std::string sizeStr;
+            if (binding.size > 1024 * 1024) {
+                sizeStr = std::to_string(binding.size / 1024.0 / 1024.0) + " MB";
+            } else if (binding.size > 1024) {
+                sizeStr = std::to_string(binding.size / 1024.0) + " KB";
             } else {
-                totalOutputSize += tensor.size;
-                std::cout << "Output buffer (" << tensor.name << "): " << tensor.size 
-                         << " bytes (" << tensor.size / 1024.0 / 1024.0 << " MB)" << std::endl;
+                sizeStr = std::to_string(binding.size) + " bytes";
+            }
+            
+            if (binding.isInput) {
+                totalInputSize += binding.size;
+                std::cout << "Input buffer (" << binding.name << "): " << binding.size 
+                         << " bytes (" << sizeStr << ")" << std::endl;
+            } else {
+                totalOutputSize += binding.size;
+                std::cout << "Output buffer (" << binding.name << "): " << binding.size 
+                         << " bytes (" << sizeStr << ")" << std::endl;
             }
         }
         
         size_t totalIOSize = totalInputSize + totalOutputSize;
-        size_t deviceMemory = engine->getDeviceMemorySizeV2();
+        size_t deviceMemory = engine->getDeviceMemorySize();
         
         std::cout << "Total I/O memory: " << totalIOSize << " bytes (" 
                  << totalIOSize / 1024.0 / 1024.0 << " MB)" << std::endl;
@@ -377,6 +458,14 @@ public:
                  << deviceMemory / 1024.0 / 1024.0 << " MB)" << std::endl;
         std::cout << "Total GPU memory needed: " << (totalIOSize + deviceMemory) << " bytes ("
                  << (totalIOSize + deviceMemory) / 1024.0 / 1024.0 << " MB)" << std::endl;
+        
+        // Memory allocation guidance
+        std::cout << "\nMemory allocation guidance:" << std::endl;
+        std::cout << "void* buffers[" << bindings.size() << "];" << std::endl;
+        for (const auto& binding : bindings) {
+            std::cout << "cudaMalloc(&buffers[" << binding.bindingIndex << "], " 
+                     << binding.size << "); // " << binding.name << std::endl;
+        }
     }
     
     bool validateEngine() {
@@ -387,10 +476,10 @@ public:
         
         std::cout << "\n=== Engine Validation ===" << std::endl;
         
-        // Check if engine has tensors
-        int32_t nbIOTensors = engine->getNbIOTensors();
-        if (nbIOTensors == 0) {
-            std::cerr << "✗ Engine has no I/O tensors" << std::endl;
+        // Check if engine has bindings
+        int nbBindings = engine->getNbBindings();
+        if (nbBindings == 0) {
+            std::cerr << "✗ Engine has no bindings" << std::endl;
             return false;
         }
         
@@ -398,38 +487,43 @@ public:
         bool hasInput = false;
         bool hasOutput = false;
         
-        for (int32_t i = 0; i < nbIOTensors; ++i) {
-            const char* name = engine->getIOTensorName(i);
-            nvinfer1::TensorIOMode ioMode = engine->getTensorIOMode(name);
-            
-            if (ioMode == nvinfer1::TensorIOMode::kINPUT) {
+        for (int i = 0; i < nbBindings; ++i) {
+            if (engine->bindingIsInput(i)) {
                 hasInput = true;
-            } else if (ioMode == nvinfer1::TensorIOMode::kOUTPUT) {
+            } else {
                 hasOutput = true;
             }
         }
         
         if (!hasInput) {
-            std::cerr << "✗ No input tensors found" << std::endl;
+            std::cerr << "✗ No input bindings found" << std::endl;
             return false;
         }
         
         if (!hasOutput) {
-            std::cerr << "✗ No output tensors found" << std::endl;
+            std::cerr << "✗ No output bindings found" << std::endl;
             return false;
         }
         
         std::cout << "✓ Engine structure valid" << std::endl;
-        std::cout << "✓ Input/output tensors present" << std::endl;
+        std::cout << "✓ Input/output bindings present" << std::endl;
         
         // Check if this looks like a YOLO model
         bool looksLikeYOLO = false;
-        for (const auto& tensor : tensors) {
-            if (tensor.isInput && tensor.dims.nbDims == 4) {
-                // Typical YOLO input: [batch, 3, height, width]
-                if (tensor.dims.d[1] == 3) {
-                    looksLikeYOLO = true;
-                    break;
+        for (const auto& binding : bindings) {
+            if (binding.isInput) {
+                if (engine->hasImplicitBatchDimension() && binding.dims.nbDims == 3) {
+                    // CHW format with implicit batch
+                    if (binding.dims.d[0] == 3) {
+                        looksLikeYOLO = true;
+                        break;
+                    }
+                } else if (!engine->hasImplicitBatchDimension() && binding.dims.nbDims == 4) {
+                    // NCHW format with explicit batch
+                    if (binding.dims.d[1] == 3) {
+                        looksLikeYOLO = true;
+                        break;
+                    }
                 }
             }
         }
@@ -445,40 +539,48 @@ public:
     
     void printAdvancedInfo() {
         std::cout << "\n=== Advanced Engine Information ===" << std::endl;
-        std::cout << "Engine capability: ";
-        nvinfer1::EngineCapability capability = engine->getEngineCapability();
-        switch (capability) {
-            case nvinfer1::EngineCapability::kSTANDARD:
-                std::cout << "STANDARD (full functionality)" << std::endl;
-                break;
-            case nvinfer1::EngineCapability::kSAFETY:
-                std::cout << "SAFETY (limited functionality)" << std::endl;
-                break;
-            default:
-                std::cout << "Unknown" << std::endl;
-                break;
-        }
         
-        std::cout << "Number of auxiliary streams: " << engine->getNbAuxStreams() << std::endl;
-        std::cout << "Streamable weights size: " << engine->getStreamableWeightsSize() 
-                 << " bytes (" << engine->getStreamableWeightsSize() / 1024.0 / 1024.0 << " MB)" << std::endl;
+        std::cout << "TensorRT version: " << NV_TENSORRT_MAJOR << "." 
+                 << NV_TENSORRT_MINOR << "." << NV_TENSORRT_PATCH << std::endl;
         
-        // Check if engine can be refitted
-        if (engine->isRefittable()) {
-            std::cout << "✓ Engine supports weight refitting" << std::endl;
+        // Check batch dimension type
+        if (engine->hasImplicitBatchDimension()) {
+            std::cout << "Batch mode: Implicit (older TensorRT style)" << std::endl;
+            std::cout << "Max batch size: " << engine->getMaxBatchSize() << std::endl;
         } else {
-            std::cout << "Engine does not support weight refitting" << std::endl;
+            std::cout << "Batch mode: Explicit (modern TensorRT style)" << std::endl;
         }
         
-        std::cout << "\nTensor Details:" << std::endl;
-        for (const auto& tensor : tensors) {
-            std::cout << "  " << tensor.name << ": ";
-            if (engine->isShapeInferenceIO(tensor.name.c_str())) {
-                std::cout << "Shape inference tensor";
-            } else {
-                std::cout << "Regular tensor";
+        // Check optimization profiles for dynamic shapes
+        if (!engine->hasImplicitBatchDimension()) {
+            int nbProfiles = engine->getNbOptimizationProfiles();
+            std::cout << "Number of optimization profiles: " << nbProfiles << std::endl;
+            
+            if (nbProfiles > 1) {
+                std::cout << "⚠ Multiple optimization profiles detected - dynamic shapes supported" << std::endl;
             }
-            std::cout << std::endl;
+        }
+        
+        std::cout << "\nBinding details:" << std::endl;
+        for (const auto& binding : bindings) {
+            std::cout << "  " << binding.name << " (index " << binding.bindingIndex << "): ";
+            if (binding.isInput) {
+                std::cout << "INPUT";
+            } else {
+                std::cout << "OUTPUT";
+            }
+            std::cout << " - " << getDataTypeName(binding.dataType) << std::endl;
+        }
+        
+        // Inference execution guidance
+        std::cout << "\nInference execution (TensorRT 8.2):" << std::endl;
+        if (engine->hasImplicitBatchDimension()) {
+            std::cout << "  Use context->enqueue(batchSize, buffers, stream, nullptr)" << std::endl;
+            std::cout << "  Or context->execute(batchSize, buffers)" << std::endl;
+        } else {
+            std::cout << "  Use context->enqueueV2(buffers, stream, nullptr)" << std::endl;
+            std::cout << "  Or context->executeV2(buffers)" << std::endl;
+            std::cout << "  Set dynamic shapes with context->setBindingDimensions() if needed" << std::endl;
         }
     }
 };
@@ -522,11 +624,16 @@ int main(int argc, char* argv[]) {
         
         std::cout << "\n✓ Engine validation complete!" << std::endl;
         std::cout << "\nNext steps for inference:" << std::endl;
-        std::cout << "1. Allocate GPU memory for input/output tensors" << std::endl;
-        std::cout << "2. Preprocess images (resize, pad, normalize, HWC→CHW)" << std::endl;
-        std::cout << "3. Copy input data to GPU" << std::endl;
-        std::cout << "4. Run inference using context->executeV2()" << std::endl;
-        std::cout << "5. Copy output data from GPU and post-process" << std::endl;
+        std::cout << "1. Allocate GPU memory for input/output buffers" << std::endl;
+        std::cout << "2. Preprocess images (resize, pad, normalize, HWC→CHW/NCHW)" << std::endl;
+        std::cout << "3. Copy input data to GPU using cudaMemcpy" << std::endl;
+        if (validator.engine && validator.engine->hasImplicitBatchDimension()) {
+            std::cout << "4. Run inference using context->enqueue() or execute()" << std::endl;
+        } else {
+            std::cout << "4. Set dynamic shapes if needed with setBindingDimensions()" << std::endl;
+            std::cout << "5. Run inference using context->enqueueV2() or executeV2()" << std::endl;
+        }
+        std::cout << "6. Copy output data from GPU and post-process" << std::endl;
         
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
