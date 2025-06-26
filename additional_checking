@@ -1,0 +1,45 @@
+using namespace std;
+using namespace cv;
+using namespace nvinfer1;
+
+auto image = cv::imread("image.png", cv::IMREAD_COLOR);  // Fixed: "image.png" not "image,png"
+cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
+
+// Get original image dimensions
+int orig_width = image.cols;
+int orig_height = image.rows;
+
+// Target dimensions (from your engine: 640x640)
+int target_width = 640;   // dims.d[3]
+int target_height = 640;  // dims.d[2]
+
+// Calculate scale to maintain aspect ratio
+float scale = std::min((float)target_width / orig_width, (float)target_height / orig_height);
+
+// Calculate new dimensions after scaling
+int new_width = (int)(orig_width * scale);
+int new_height = (int)(orig_height * scale);
+
+// Resize image maintaining aspect ratio
+cv::resize(image, image, Size(new_width, new_height));
+
+// Calculate padding needed to reach target size
+int pad_width = target_width - new_width;
+int pad_height = target_height - new_height;
+
+// Split padding evenly on both sides
+int pad_left = pad_width / 2;
+int pad_right = pad_width - pad_left;
+int pad_top = pad_height / 2;
+int pad_bottom = pad_height - pad_top;
+
+std::cout << "Original: " << orig_width << "x" << orig_height << std::endl;
+std::cout << "Scaled: " << new_width << "x" << new_height << std::endl;
+std::cout << "Padding: L=" << pad_left << " R=" << pad_right << " T=" << pad_top << " B=" << pad_bottom << std::endl;
+
+// Apply padding
+Mat padded_image;
+Scalar PAD_VALUE(114, 114, 114);  // Gray padding
+copyMakeBorder(image, padded_image, pad_top, pad_bottom, pad_left, pad_right, BORDER_CONSTANT, PAD_VALUE);
+
+std::cout << "Final size: " << padded_image.cols << "x" << padded_image.rows << std::endl;
