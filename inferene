@@ -7,6 +7,13 @@
 #include <NvInferRuntime.h>
 #include <opencv2/opencv.hpp>
 
+// ============================================
+// CHANGE THESE PATHS FOR YOUR FILES
+// ============================================
+const std::string ENGINE_PATH = "yolov12x.plan";           // Your .plan file
+const std::string IMAGE_PATH = "test_image.jpg";           // Your test image (optional)
+// ============================================
+
 class Logger : public nvinfer1::ILogger {
 public:
     void log(Severity severity, const char* msg) noexcept override {
@@ -31,7 +38,7 @@ public:
     bool loadEngine(const std::string& enginePath) {
         std::ifstream file(enginePath, std::ios::binary);
         if (!file.good()) {
-            std::cerr << "❌ Cannot open engine file: " << enginePath << std::endl;
+            std::cerr << "ERROR: Cannot open engine file: " << enginePath << std::endl;
             return false;
         }
         
@@ -49,17 +56,17 @@ public:
             runtime->deserializeCudaEngine(engineData.data(), size));
         
         if (!engine) {
-            std::cerr << "❌ Failed to create engine" << std::endl;
+            std::cerr << "ERROR: Failed to create engine" << std::endl;
             return false;
         }
         
         context = std::unique_ptr<nvinfer1::IExecutionContext>(engine->createExecutionContext());
         if (!context) {
-            std::cerr << "❌ Failed to create context" << std::endl;
+            std::cerr << "ERROR: Failed to create context" << std::endl;
             return false;
         }
         
-        std::cout << "✅ Engine loaded successfully!" << std::endl;
+        std::cout << "SUCCESS: Engine loaded successfully: " << enginePath << std::endl;
         return true;
     }
     
@@ -105,7 +112,7 @@ public:
         
         cv::Mat image = cv::imread(imagePath);
         if (image.empty()) {
-            std::cerr << "❌ Cannot load image: " << imagePath << std::endl;
+            std::cout << "WARNING: Cannot load image: " << imagePath << " (skipping image check)" << std::endl;
             return;
         }
         
@@ -124,7 +131,7 @@ public:
         }
         
         if (inputIndex == -1) {
-            std::cout << "❌ No input found!" << std::endl;
+            std::cout << "ERROR: No input found!" << std::endl;
             return;
         }
         
@@ -141,7 +148,7 @@ public:
             reqHeight = inputDims.d[2];
             reqWidth = inputDims.d[3];
         } else {
-            std::cout << "❌ Unexpected input format!" << std::endl;
+            std::cout << "ERROR: Unexpected input format!" << std::endl;
             return;
         }
         
@@ -149,9 +156,9 @@ public:
         
         // Check compatibility
         if (image.channels() != reqChannels) {
-            std::cout << "⚠️  Channel mismatch! Need to convert " << image.channels() << " → " << reqChannels << std::endl;
+            std::cout << "WARNING: Channel mismatch! Need to convert " << image.channels() << " -> " << reqChannels << std::endl;
         } else {
-            std::cout << "✅ Channels OK" << std::endl;
+            std::cout << "OK: Channels match" << std::endl;
         }
         
         // Calculate padding for letterbox
@@ -167,7 +174,7 @@ public:
         std::cout << "1. Resize to: " << newWidth << "x" << newHeight << " (scale: " << scale << ")" << std::endl;
         std::cout << "2. Pad: L=" << padLeft << " T=" << padTop << " R=" << padRight << " B=" << padBottom << std::endl;
         std::cout << "3. Convert to float32 and normalize (/255.0)" << std::endl;
-        std::cout << "4. Convert HWC → " << (engine->hasImplicitBatchDimension() ? "CHW" : "NCHW") << std::endl;
+        std::cout << "4. Convert HWC -> " << (engine->hasImplicitBatchDimension() ? "CHW" : "NCHW") << std::endl;
         
         // Show OpenCV code
         std::cout << "\n=== OPENCV CODE ===" << std::endl;
@@ -234,35 +241,33 @@ public:
     }
 };
 
-int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        std::cout << "Usage: " << argv[0] << " <engine_file> [image_file]" << std::endl;
-        std::cout << "Example: " << argv[0] << " yolov12x.plan test.jpg" << std::endl;
-        return 1;
-    }
-    
-    std::string enginePath = argv[1];
-    std::string imagePath = (argc > 2) ? argv[2] : "";
+int main() {
+    std::cout << "YOLOv12x Engine Validator" << std::endl;
+    std::cout << "=========================" << std::endl;
     
     YOLOValidator validator;
     
     // Load engine
-    if (!validator.loadEngine(enginePath)) {
+    std::cout << "Loading engine: " << ENGINE_PATH << std::endl;
+    if (!validator.loadEngine(ENGINE_PATH)) {
+        std::cout << "\nFAILED! Check your ENGINE_PATH in the code." << std::endl;
         return 1;
     }
     
     // Analyze engine
     validator.analyzeEngine();
     
-    // Check image if provided
-    if (!imagePath.empty()) {
-        validator.checkImage(imagePath);
+    // Check image if path is provided
+    if (!IMAGE_PATH.empty()) {
+        std::cout << "\nChecking image: " << IMAGE_PATH << std::endl;
+        validator.checkImage(IMAGE_PATH);
     }
     
     // Show inference code
     validator.showInferenceCode();
     
-    std::cout << "\n✅ Done! Your engine is ready for inference." << std::endl;
+    std::cout << "\nDONE! Your engine is ready for inference." << std::endl;
+    std::cout << "\nTo change files, edit ENGINE_PATH and IMAGE_PATH at the top of this code." << std::endl;
     
     return 0;
 }
