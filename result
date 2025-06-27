@@ -1,0 +1,144 @@
+# Slide 1: Model Performance Comparison - Key Metrics
+
+## Core Performance Matrix
+
+| Model | Speed | Accuracy | Parameters | Use Case Strength |
+|-------|-------|----------|------------|-------------------|
+| **YOLO11s** | **1.1ms** | **70.9%** | 9.42M | **Real-time Driving** |
+| **YOLOv12n** | **1.3ms** | 68.4% | 2.56M | **Edge Computing** |
+| **YOLOv12s** | 1.6ms | **71.6%** | 9.24M | **Suburban Driving** |
+| **RT-DETR-L** | 2.9ms | **71.0%** | 32.97M | **Construction Zones** |
+| **YOLOv12x** | 5.1ms | **76.1%** | 59.06M | **Pedestrian Safety** |
+| **RT-DETR-X** | 4.2ms | **76.6%** | 65.50M | **Emergency Scenarios** |
+
+## Critical Safety Metrics for Autonomous Vehicles
+
+### Pedestrian & Cyclist Detection (Safety Critical)
+| Model | Pedestrian mAP50 | Cyclist mAP50 | Combined Safety Score* |
+|-------|------------------|---------------|------------------------|
+| **YOLOv12x** | **73.1%** | **80.7%** | **76.9%** BEST |
+| **RT-DETR-X** | 66.2% | **79.6%** | 72.9% |
+| **YOLOv12s** | **69.5%** | 76.0% | 72.8% |
+| **RT-DETR-L** | 67.9% | 72.4% | 70.2% |
+| **YOLO11s** | 68.6% | 72.5% | 70.6% |
+| **YOLOv12n** | 61.4% | 63.2% | 62.3% |
+
+*Combined Safety Score = (Pedestrian + Cyclist) / 2
+
+### Vehicle Detection (Core Driving)
+| Model | Car mAP50 | Truck mAP50 | Bus mAP50 | Vehicle Avg |
+|-------|-----------|-------------|-----------|-------------|
+| **YOLO11s** | **92.5%** | **96.5%** | **99.1%** | **96.0%** BEST |
+| **YOLOv12s** | 92.3% | 96.0% | **99.1%** | 95.8% |
+| **YOLOv12x** | 91.8% | 96.2% | **99.3%** | 95.8% |
+| **YOLOv12n** | **92.2%** | 95.8% | 98.8% | 95.6% |
+| **RT-DETR-X** | 91.6% | 95.8% | 98.0% | 95.1% |
+| **RT-DETR-L** | 91.0% | 95.4% | 99.0% | 95.1% |
+
+## Speed vs Accuracy Trade-off
+
+```
+High Accuracy (76%+)
+                    RT-DETR-X ●
+                    YOLOv12x ●
+                              
+Medium Accuracy (70-76%)
+        YOLOv12s ●     RT-DETR-L ●
+        YOLO11s ●               
+                              
+Speed Priority (68-70%)
+YOLOv12n ●                     
+                              
+    Fast ←←←← Speed ————→ Slow
+    1ms   2ms   3ms   4ms   5ms
+```
+
+## Training & Deployment Efficiency
+
+| Model | Training Time | GPU Memory | Deployment Ready |
+|-------|---------------|------------|------------------|
+| **YOLO11s** | **1.7h** FAST | 4.61G | **Production** |
+| **YOLOv12n** | **1.6h** FAST | **3.32G** | **Edge Device** |
+| **YOLOv12s** | 3.6h | 6.9G | Balanced |
+| **RT-DETR-L** | 4.7h | 12.9G | Server Only |
+| **YOLOv12x** | **20.8h** SLOW | **25.1G** | High Resources |
+| **RT-DETR-X** | 7.1h | 18.3G | Server Only |
+
+---
+
+# Slide 2: Autonomous Vehicle Use Case Recommendations
+
+## Real-World Driving Scenarios
+
+### **Urban City Driving**
+**High pedestrian density, complex intersections, frequent stops**
+- **Primary**: **YOLO11s** - 1.1ms response critical for safety
+- **Backup**: RT-DETR-X for maximum pedestrian accuracy (66.2% → 73.1%)
+- **Key**: Speed trumps slight accuracy loss in dense traffic
+
+### **Suburban Neighborhoods** 
+**Moderate complexity, children playing, residential areas**
+- **Recommended**: **YOLOv12s** - Best balanced performance (71.6% mAP50)
+- **Alternative**: YOLO11s for cost-sensitive deployments
+- **Focus**: Good pedestrian detection (69.5%) with reliable vehicle detection
+
+### **Rural Countryside/Fields**
+**Minimal infrastructure, livestock, agricultural vehicles, dirt roads**
+- **Optimal**: **YOLOv12n** - Efficient processing for simple environments
+- **Alternative**: YOLO11s for mixed rural/urban routes
+- **Challenge**: Limited training data for agricultural objects and animals
+- **Advantage**: Fewer complex objects allow lightweight model deployment
+
+### **Highway Driving**
+**High speeds, primarily vehicle detection, minimal pedestrians**
+- **Optimal**: **YOLO11s** - Fastest processing (1.1ms) for high-speed decisions
+- **Advantage**: Excellent vehicle detection (96.0% avg) with minimal latency
+- **Critical**: Sub-millisecond response time for collision avoidance
+
+### **Construction/Work Zones**
+**Unusual objects, workers present, safety critical environment**
+- **Required**: **YOLOv12x** - Maximum accuracy (76.1% mAP50) for worker safety
+- **Justification**: 5.1ms acceptable when human lives at stake
+- **Priority**: Pedestrian safety (73.1%) over speed in controlled zones
+
+### **Parking Lots & Low Speed**
+**Close proximity objects, pedestrians, cyclists, tight spaces**
+- **Best**: **RT-DETR-X** - Highest overall accuracy (76.6% mAP50)
+- **Rationale**: Low speeds allow for 4.2ms processing time
+- **Benefit**: Superior cyclist detection (79.6%) in confined spaces
+
+### **Emergency Response Mode**
+**Accident scenarios, unpredictable objects, maximum safety**
+- **Critical**: **RT-DETR-X** - Highest accuracy for life-threatening situations
+- **Backup**: YOLOv12x as secondary system
+- **Override**: Accuracy over speed when lives depend on detection
+
+## Deployment Strategy Matrix
+
+| Scenario | Primary Model | Accuracy Trade-off | Speed Requirement | Justification |
+|----------|---------------|-------------------|-------------------|---------------|
+| **City Driving** | YOLO11s | 70.9% mAP50 | **1.1ms** FAST | Safety through speed |
+| **Suburban** | YOLOv12s | **71.6% mAP50** | 1.6ms | Balanced performance |
+| **Rural/Fields** | YOLOv12n | 68.4% mAP50 | **1.3ms** | Simple environment efficiency |
+| **Highway** | YOLO11s | 70.9% mAP50 | **1.1ms** FAST | Vehicle-focused, speed critical |
+| **Construction** | YOLOv12x | **76.1% mAP50** | 5.1ms | Worker safety priority |
+| **Parking** | RT-DETR-X | **76.6% mAP50** | 4.2ms | Precision in tight spaces |
+| **Emergency** | RT-DETR-X | **76.6% mAP50** | 4.2ms | Maximum accuracy required |
+
+## Expansion Recommendations
+
+### **Current Strengths to Leverage:**
+- **Vehicle Detection**: All models excel (>95% mAP50)
+- **Large Object Detection**: Buses, Trucks consistently detected
+- **Speed Advantage**: YOLO11s breakthrough in real-time processing
+
+### **Areas for Improvement:**
+- **Small Object Detection**: Motorcycles need attention (~52% avg)
+- **Rural Objects**: Animal/livestock detection currently at 0%
+- **Agricultural Vehicles**: Limited training data for farm equipment
+
+### **Fleet Deployment Strategy:**
+1. **Standard Fleet**: YOLO11s (optimal speed-accuracy balance)
+2. **High-Risk Routes**: YOLOv12x (construction zones, school areas)
+3. **Rural/Edge Computing**: YOLOv12n (resource-constrained, simple environments)
+4. **Premium Vehicles**: RT-DETR-X (maximum safety features)
