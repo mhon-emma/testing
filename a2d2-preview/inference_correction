@@ -1,0 +1,83 @@
+// Allocate for the correct output format: [1, 8, 8400]
+float* output_data;
+cudaMalloc(&output_data, 1 * 8 * 8400 * sizeof(float));
+
+// Set binding for the output (binding 1 is output0)
+std::vector<void*> buffers = { data_d, output_data };
+
+// Run inference n times
+const int count = 100;
+auto start = chrono::steady_clock::now();
+for (int i = 0; i < count; i++) {
+    _context->setBindingDimensions(0, Dims4(batch, dims.d[1], dims.d[2], dims.d[3]));
+    _context->enqueueV2(buffers.data(), _stream, nullptr);
+    cudaStreamSynchronize(_stream);
+}
+
+auto stop = chrono::steady_clock::now();
+auto timing = chrono::duration_cast<chrono::duration<double>>(stop - start);
+std::cout << "Took " << timing.count() / count << " seconds per inference." << std::endl;
+
+// Copy output back to host
+float* host_output = new float[8 * 8400];
+cudaMemcpy(host_output, output_data, 8 * 8400 * sizeof(float), cudaMemcpyDeviceToHost);
+
+// Parse detections - format is [8, 8400] where each detection has 8 values
+std::cout << "=== Parsing 8400 detections ===" << std::endl;
+
+for (int i = 0; i < 8400; i++) {
+    // Access the 8 values for detection i
+    float val0 = host_output[0 * 8400 + i];  // x_center
+    float val1 = host_output[1 * 8400 + i];  // y_center  
+    float val2 = host_output[2 * 8400 + i];  // width
+    float val3 = host_output[3 * 8400 + i];  // height
+    float val4 = host_output[4 * 8400 + i];  // confidence
+    float val5 = host_output[5 * 8400 + i];  // class_id
+    float val6 = host_output[6 * 8400 + i];  // extra value
+    float val7 = host_output[7 * 8400 + i];  // extra value
+    
+    // Check if this is a valid detection
+    if (val4 > 0.5) {  // confidence threshold
+        // Convert normalized coordinates to pixels
+        float x_center = val0;
+        float y_center = val1;
+        float width = val2;
+        float height = val3;
+        float confidence = val4;
+        int class_id = (int)val5;
+        
+        // Convert to corner coordinates
+        float x1 = (x_center - width/2.0) * orig_width;
+        float y1 = (y_center - height/2.0) * orig_height;
+        float x2 = (x_center + width/2.0) * orig_width;
+        float y2 = (y_center + height/2.0) * orig_height;
+        
+        // Clamp to image boundaries
+        x1 = std::max(0.0f, std::min((float)orig_width, x1));
+        y1 = std::max(0.0f, std::min((float)orig_height, y1));
+        x2 = std::max(0.0f, std::min((float)orig_width, x2));
+        y2 = std::max(0.0f, std::min((float)orig_height, y2));
+        
+        // Get class name
+        std::string class_name = "unknown";
+        if (class_id >= 0 && class_id < class_names.size()) {
+            class_name = class_names[class_id];
+        }
+        
+        std::cout << "Found box {" << x1 << ", " << y1 << ", " << x2 << ", " << y2
+                  << "} with score " << confidence << " and class " << class_name 
+                  << " (id: " << class_id << ")" << std::endl;
+        
+        // Draw bounding box
+        cv::rectangle(image, cv::Point((int)x1, (int)y1), cv::Point((int)x2, (int)y2), cv::Scalar(0, 255, 0), 2);
+        
+        // Draw class label
+        std::string label = class_name + " " + std::to_string((int)(confidence * 100)) + "%";
+        cv::putText(image, label, cv::Point((int)x1, (int)y1 - 10), 
+                    cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 2);
+    }
+}
+
+// Cleanup
+delete[] host_output;
+cudaFree(output_data);
