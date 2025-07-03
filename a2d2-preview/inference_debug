@@ -1,62 +1,56 @@
-// Copy output back to host with correct format [1, 8, 8400]
-float* host_output = new float[8 * 8400];
-cudaMemcpy(host_output, det_boxes_d, 8 * 8400 * sizeof(float), cudaMemcpyDeviceToHost);
+// Copy output back to host with correct format [1, 18, 8400]
+float* host_output = new float[18 * 8400];
+cudaMemcpy(host_output, det_boxes_d, 18 * 8400 * sizeof(float), cudaMemcpyDeviceToHost);
 
-// Debug: Print first few raw values to understand the format
-std::cout << "=== Raw Output Debug ===" << std::endl;
-std::cout << "First 10 values from each channel:" << std::endl;
-for (int ch = 0; ch < 8; ch++) {
-    std::cout << "Channel " << ch << ": ";
-    for (int i = 0; i < 10; i++) {
-        std::cout << host_output[ch * 8400 + i] << " ";
-    }
-    std::cout << std::endl;
+// Debug: Print structure first
+std::cout << "=== Output Structure Debug [18, 8400] ===" << std::endl;
+std::cout << "First detection (index 0) - all 18 values:" << std::endl;
+for (int ch = 0; ch < 18; ch++) {
+    std::cout << "Channel " << ch << ": " << host_output[ch * 8400 + 0] << std::endl;
 }
 
-// Debug: Look for any non-zero confidence values
-std::cout << "\nLooking for non-zero values in channel 4 (assumed confidence):" << std::endl;
-int non_zero_count = 0;
-float max_conf = 0;
-for (int i = 0; i < 8400; i++) {
-    float val = host_output[4 * 8400 + i];  // Channel 4
-    if (val > 0.001) {  // Very low threshold
-        if (non_zero_count < 5) {  // Print first 5
-            std::cout << "Index " << i << ": " << val << std::endl;
-        }
-        non_zero_count++;
-        if (val > max_conf) max_conf = val;
-    }
-}
-std::cout << "Found " << non_zero_count << " non-zero confidence values" << std::endl;
-std::cout << "Max confidence: " << max_conf << std::endl;
-
-// Try parsing with very low threshold
+// Parse detections from the [18, 8400] format
 int detection_count = 0;
 for (int i = 0; i < 8400 && detection_count < 1000; i++) {
+    // Get bounding box (first 4 channels)
     float x_center = host_output[0 * 8400 + i];  
     float y_center = host_output[1 * 8400 + i];  
     float width = host_output[2 * 8400 + i];    
     float height = host_output[3 * 8400 + i];   
-    float confidence = host_output[4 * 8400 + i];
-    float class_id_f = host_output[5 * 8400 + i];
     
-    // Use very low threshold for testing
-    if (confidence > 0.001) {  
-        std::cout << "Detection " << detection_count << ": conf=" << confidence 
+    // Get objectness confidence (channel 4)
+    float objectness = host_output[4 * 8400 + i];
+    
+    // Find best class from channels 5-17 (13 classes)
+    int best_class = 0;
+    float best_class_prob = host_output[5 * 8400 + i];
+    for (int c = 1; c < 13; c++) {
+        float class_prob = host_output[(5 + c) * 8400 + i];
+        if (class_prob > best_class_prob) {
+            best_class = c;
+            best_class_prob = class_prob;
+        }
+    }
+    
+    // Final confidence = objectness * best_class_probability
+    float final_confidence = objectness * best_class_prob;
+    
+    // Use lower threshold for testing
+    if (final_confidence > 0.1) {  
+        std::cout << "Detection " << detection_count << ": conf=" << final_confidence 
+                  << " (obj=" << objectness << " * class=" << best_class_prob << ")"
                   << " box=[" << x_center << "," << y_center << "," << width << "," << height << "]" 
-                  << " class=" << class_id_f << std::endl;
+                  << " class=" << best_class << std::endl;
         
-        det_scores[detection_count] = confidence;
-        det_classes[detection_count] = class_id_f;
+        det_scores[detection_count] = final_confidence;
+        det_classes[detection_count] = (float)best_class;
         det_boxes[detection_count * 4 + 0] = x_center;
         det_boxes[detection_count * 4 + 1] = y_center;
         det_boxes[detection_count * 4 + 2] = width;
         det_boxes[detection_count * 4 + 3] = height;
         detection_count++;
-        
-        if (detection_count >= 10) break;  // Limit for debugging
     }
 }
 
 int num_dets = detection_count;
-std::cout << "Found " << num_dets << " detections with threshold 0.001" << std::endl;
+std::cout << "Found " << num_dets << " valid detections" << std::endl;
